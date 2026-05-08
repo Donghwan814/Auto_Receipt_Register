@@ -326,4 +326,96 @@ class ReceiptParserTest {
                 """;
         assertThat(parser.parse(raw).getTotalAmount()).isNull();
     }
+
+    // ---------- OCR 줄 분리 합계 라벨 ----------
+
+    @Test
+    void 합계가_세로로_분리된_OCR도_5500_인식() {
+        String raw = """
+                부가세 과세 물품가액:
+                1.364
+                부
+                가
+                세:
+                136
+                부가세 면세 물품가액:
+                3,500
+                합
+                계:
+                5,500
+                할인금액:
+                4,000
+                받을금액:
+                1,500
+                받은금액:
+                1,500
+                결제수단별 결제내역
+                1. 카드결제:
+                1,500
+                """;
+        assertThat(parser.parse(raw).getTotalAmount()).isEqualTo(5500);
+    }
+
+    @Test
+    void 합_계_콜론_다음줄_5500() {
+        String raw = """
+                상품명 수량 금액
+                커피 1 5,500
+                합 계:
+                5,500
+                """;
+        assertThat(parser.parse(raw).getTotalAmount()).isEqualTo(5500);
+    }
+
+    @Test
+    void 합계_다음줄_5500() {
+        String raw = """
+                상품명 수량 금액
+                커피 1 5,500
+                합계
+                5,500
+                """;
+        assertThat(parser.parse(raw).getTotalAmount()).isEqualTo(5500);
+    }
+
+    @Test
+    void 합계_없으면_받을금액_fallback_1500() {
+        String raw = """
+                받을금액:
+                1,500
+                받은금액:
+                1,500
+                """;
+        assertThat(parser.parse(raw).getTotalAmount()).isEqualTo(1500);
+    }
+
+    @Test
+    void 카드결제_1500은_합계_5500이_있을때_무시() {
+        String raw = """
+                합계:
+                5,500
+                카드결제:
+                1,500
+                """;
+        assertThat(parser.parse(raw).getTotalAmount()).isEqualTo(5500);
+    }
+
+    @Test
+    void 승인번호_카드번호_주문번호는_amount_후보에서_제외() {
+        String raw = """
+                주문번호: 1234567
+                카드번호: 510737******9124
+                승인번호: 05303998
+                합계:
+                7,800
+                """;
+        assertThat(parser.parse(raw).getTotalAmount()).isEqualTo(7800);
+    }
+
+    @Test
+    void normalizeLabelCandidate_공백_콜론_제거() {
+        assertThat(ReceiptParser.normalizeLabelCandidate("합 계:")).isEqualTo("합계");
+        assertThat(ReceiptParser.normalizeLabelCandidate("합\t계 :")).isEqualTo("합계");
+        assertThat(ReceiptParser.normalizeLabelCandidate("합계")).isEqualTo("합계");
+    }
 }

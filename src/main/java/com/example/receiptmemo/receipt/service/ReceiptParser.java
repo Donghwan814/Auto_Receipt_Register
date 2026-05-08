@@ -362,39 +362,84 @@ public class ReceiptParser {
         return extractTotal(rawText.split("\\r?\\n"));
     }
 
+    /**
+     * window(1~3줄) 단위로 라벨을 탐색.
+     * OCR이 "합" / "계:" / "5,500" 처럼 라벨을 여러 줄로 쪼개도 인식할 수 있도록
+     * window 안의 텍스트를 정규화(공백/콜론/탭 제거)하여 라벨 키 포함 여부를 판단한다.
+     *
+     * 금액 추출 순서:
+     *  1) 라벨 키 위치 다음의 tail 안에 amount token 이 있으면 사용
+     *     (단, tail 에서 더 앞쪽에 다른 priority 라벨 또는 excluded 라벨이 보이면 그 앞까지만)
+     *  2) window 다음 1~4줄 사이에서 amount 후보 탐색
+     *     (부가세/카드/POS 등 noise 라인이나 다른 priority 라벨을 만나면 즉시 중단)
+     */
     private Integer scanByLabel(String[] lines, String label) {
-        String labelCompact = compact(label);
+        String labelKey = normalizeLabelCandidate(label);
         for (int i = 0; i < lines.length; i++) {
             if (lines[i] == null) continue;
-            String c = compact(lines[i]);
-            if (!c.contains(labelCompact)) continue;
-            // 라벨 줄이지만 사실상 다른 라벨에 의해 가려지는 경우 방지
-            if (matchesExcludedAmountLabel(c, labelCompact)) continue;
+            int maxWin = Math.min(3, lines.length - i);
+            for (int win = 1; win <= maxWin; win++) {
+                String joined = compactWindow(lines, i, win);
+                int idx = joined.indexOf(labelKey);
+                if (idx < 0) continue;
 
-            // 1) 같은 줄, 라벨 뒤에서 숫자 추출
-            Integer same = amountAfterLabel(lines[i], label);
-            if (same != null && same <= AMOUNT_MAX) return same;
+                String tail = joined.substring(idx + labelKey.length());
+                Integer inline = firstAmountInTail(tail, label);
+                if (inline != null && inline <= AMOUNT_MAX) return inline;
 
-            // 2) 다음 1~3줄에서 숫자 추출
-            for (int k = 1; k <= 3 && i + k < lines.length; k++) {
-                String next = lines[i + k];
-                if (next == null || next.trim().isEmpty()) continue;
-                if (isAmountNoiseLine(next)) continue;
-                if (isAnotherLabel(next, label)) break; // 다른 라벨 만나면 중단
-                Integer val = firstAmountToken(next);
-                if (val != null && val <= AMOUNT_MAX) return val;
+                for (int k = 0; k < 4 && i + win + k < lines.length; k++) {
+                    String next = lines[i + win + k];
+                    if (next == null || next.trim().isEmpty()) continue;
+                    if (isAmountNoiseLine(next)) break;
+                    if (isAnotherLabel(next, label)) break;
+                    Integer val = firstAmountToken(next);
+                    if (val != null && val <= AMOUNT_MAX) return val;
+                }
+                // 라벨은 찾았지만 amount 가 없거나 1M 초과였다면, 더 큰 window 로 재시도하지 않고
+                // 다음 i 로 이동한다 (같은 i 의 더 큰 window 는 라벨 위치만 같고 결론도 동일).
+                break;
             }
         }
         return null;
     }
 
-    private boolean matchesExcludedAmountLabel(String compactLine, String wantedCompact) {
-        for (String ex : AMOUNT_EXCLUDE_LABELS) {
-            if (compactLine.contains(ex) && !ex.contains(wantedCompact) && !wantedCompact.contains(ex)) {
-                return true;
-            }
+    /** OCR 라벨 정규화: 공백/콜론/탭 제거. "합 계:" → "합계", "합\n계:" 도 합쳐서 정규화하면 "합계". */
+    static String normalizeLabelCandidate(String s) {
+        if (s == null) return "";
+        return s.replaceAll("[\\s:：]+", "");
+    }
+
+    /** lines[start..start+size-1] 를 이어붙여 정규화한 문자열. */
+    private String compactWindow(String[] lines, int start, int size) {
+        StringBuilder sb = new StringBuilder();
+        for (int k = 0; k < size && start + k < lines.length; k++) {
+            if (lines[start + k] != null) sb.append(lines[start + k]);
         }
-        return false;
+        return normalizeLabelCandidate(sb.toString());
+    }
+
+    /**
+     * tail 의 첫 amount token 추출. 단, tail 안에 더 앞쪽에 excluded 라벨이나
+     * 다른 priority 라벨이 있으면 그 앞부분까지만 본다 (받을금액/할인금액 같은 다른 값을 흡수하지 않게).
+     */
+    private Integer firstAmountInTail(String tail, String currentLabel) {
+        if (tail == null || tail.isEmpty()) return null;
+        String currentKey = normalizeLabelCandidate(currentLabel);
+        int stop = tail.length();
+        for (String ex : AMOUNT_EXCLUDE_LABELS) {
+            int p = tail.indexOf(ex);
+            if (p >= 0 && p < stop) stop = p;
+        }
+        for (String l : AMOUNT_LABEL_PRIORITY) {
+            String lc = normalizeLabelCandidate(l);
+            if (lc.equals(currentKey)) continue;
+            int p = tail.indexOf(lc);
+            if (p >= 0 && p < stop) stop = p;
+        }
+        String safe = tail.substring(0, stop);
+        Matcher m = AMOUNT_TOKEN.matcher(safe);
+        if (m.find()) return parseAmount(m.group(1));
+        return null;
     }
 
     /** 사업자번호/전화/카드/승인/POS/BILL 줄 → 금액 후보로 부적합. */
@@ -423,19 +468,6 @@ public class ReceiptParser {
             if (c.contains(lc)) return true;
         }
         return false;
-    }
-
-    private Integer amountAfterLabel(String line, String label) {
-        String labelPattern = label.chars()
-                .mapToObj(ch -> Pattern.quote(String.valueOf((char) ch)))
-                .reduce((a, b) -> a + "\\s*" + b)
-                .orElse("");
-        Pattern p = Pattern.compile(labelPattern + "[^0-9]*" + AMOUNT_TOKEN.pattern());
-        Matcher m = p.matcher(line);
-        if (m.find()) {
-            return parseAmount(m.group(1));
-        }
-        return null;
     }
 
     private Integer firstAmountToken(String line) {
