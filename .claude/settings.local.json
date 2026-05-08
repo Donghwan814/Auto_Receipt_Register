@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./gradlew compileJava compileTestJava --console=plain)",
+      "Bash(./gradlew test *)",
+      "Bash(./gradlew clean *)",
+      "Bash(./gradlew --stop)",
+      "Bash(rm -rf build)",
+      "Bash(./gradlew compileJava --console=plain)",
+      "Bash(./gradlew dependencies *)",
+      "Bash(./gradlew bootRun)",
+      "PowerShell(Get-Process java -ErrorAction SilentlyContinue)",
+      "PowerShell(Get-Process | Where-Object {$_.ProcessName -match 'java|gradle'} | Select-Object Id, ProcessName, StartTime)",
+      "Bash(./gradlew compileJava compileTestJava --no-daemon)",
+      "Bash(./gradlew bootJar --no-daemon)"
+    ]
+  }
+}

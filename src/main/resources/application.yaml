@@ -1,0 +1,32 @@
+spring:
+  profiles:
+    active: local
+
+server:
+  port: ${PORT:8080}
+
+notion:
+  api-key: ${NOTION_API_KEY}
+  database-id: ${NOTION_DATABASE_ID}
+  version: "2022-06-28"
+  base-url: "https://api.notion.com/v1"
+  columns:
+    name: "항목"
+    amount: "금액"
+    date: "날짜"
+    category: "카테고리"
+    memo: "메모"
+  webhook:
+    verification-token: ${NOTION_WEBHOOK_VERIFICATION_TOKEN:}
+    strict-signature-check: false
+    debug-comments: false
+
+ocr:
+  engine: google
+  google:
+    api-key: ${GOOGLE_VISION_API_KEY}
+    endpoint: "https://vision.googleapis.com/v1/images:annotate"
+    feature-type: DOCUMENT_TEXT_DETECTION
+    language-hints:
+      - ko
+      - en
