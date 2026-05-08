@@ -49,6 +49,7 @@ class NotionWebhookServiceTest {
         receiptPageService = mock(ReceiptPageService.class);
         repo = mock(WebhookEventLogRepository.class);
         webhook = new NotionWebhookService(notionService, attachmentService, receiptPageService, repo);
+        webhook.retryDelaysMs = new long[]{0L, 0L, 0L}; // 테스트 빠르게
     }
 
     private JsonNode payload(String json) throws Exception {

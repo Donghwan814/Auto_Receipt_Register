@@ -9,54 +9,74 @@ class EmojiTitleServiceTest {
 
     private final EmojiTitleService svc = new EmojiTitleService();
 
+    // ---------- icon resolution ----------
+
     @Test
-    void 라멘_매칭() {
-        assertThat(svc.resolveEmoji("마시타야")).isEqualTo("🍜");
-        assertThat(svc.build("마시타야")).isEqualTo("🍜 마시타야");
+    void 카페_category면_커피_이모지() {
+        assertThat(svc.resolveIcon("스타벅스 강남점", null, "카페")).isEqualTo("☕");
+        assertThat(svc.resolveIcon("메가MGC 커피 영등포역점", null, "카페")).isEqualTo("☕");
     }
 
     @Test
-    void 커피빈_카페() {
-        assertThat(svc.resolveEmoji("커피빈 홍대점")).isEqualTo("☕");
+    void 베이글은_빵_이모지() {
+        assertThat(svc.resolveIcon("너구리베이글", null, null)).isEqualTo("🥯");
+        assertThat(svc.resolveIcon("너구리베이글(팝업)", null, "식비")).isEqualTo("🥯");
+    }
+
+    @Test
+    void 고기는_돼지_이모지() {
+        assertThat(svc.resolveIcon("고기싸롱", null, null)).isEqualTo("🐷");
+    }
+
+    @Test
+    void 라멘은_라멘_이모지() {
+        assertThat(svc.resolveIcon("마시타야", null, null)).isEqualTo("🍜");
     }
 
     @Test
     void 주차_우선() {
-        assertThat(svc.resolveEmoji("강남 주차장")).isEqualTo("🅿️");
-        // 카페 + 주차 동시 매칭 → 주차 우선
-        assertThat(svc.resolveEmoji("스타벅스 주차장")).isEqualTo("🅿️");
-    }
-
-    @Test
-    void 다이소_쇼핑() {
-        assertThat(svc.resolveEmoji("다이소")).isEqualTo("🛍️");
-    }
-
-    @Test
-    void 영화_여가() {
-        assertThat(svc.resolveEmoji("CGV 강남")).isEqualTo("🎬");
-    }
-
-    @Test
-    void GS25_편의점() {
-        assertThat(svc.resolveEmoji("GS25 봉천점")).isEqualTo("🏪");
+        assertThat(svc.resolveIcon("스타벅스 주차장", null, "카페")).isEqualTo("🅿️");
     }
 
     @Test
     void 기본값() {
-        assertThat(svc.resolveEmoji("이상한가게")).isEqualTo("💳");
-        assertThat(svc.resolveEmoji(null)).isEqualTo("💳");
+        assertThat(svc.resolveIcon("이상한가게", null, null)).isEqualTo("💳");
+        assertThat(svc.resolveIcon(null, null, null)).isEqualTo("💳");
+    }
+
+    // ---------- title (이모지 미포함) ----------
+
+    @Test
+    void 가게명_괄호는_지역으로_분리() {
+        EmojiTitleService.MerchantParts p = svc.splitMerchant("너구리베이글(팝업)");
+        assertThat(p.base).isEqualTo("너구리베이글");
+        assertThat(p.region).isEqualTo("팝업");
     }
 
     @Test
-    void merchant_없으면_가게_미상() {
-        assertThat(svc.build(null)).isEqualTo("💳 (가게 미상)");
-        assertThat(svc.build("")).isEqualTo("💳 (가게 미상)");
+    void buildTitle_괄호_지역_포함() {
+        assertThat(svc.buildTitle("너구리베이글(팝업)", null)).isEqualTo("너구리베이글 (팝업)");
     }
 
     @Test
-    void memo_fallback_매칭() {
-        // merchant 가 매칭되지 않을 때 memo 로 fallback
-        assertThat(svc.resolveEmoji("이상한가게", "라멘 + 교자")).isEqualTo("🍜");
+    void buildTitle_지점명_있는_가게는_그대로() {
+        assertThat(svc.buildTitle("메가MGC 커피 영등포역점", null))
+                .isEqualTo("메가MGC 커피 영등포역점");
+    }
+
+    @Test
+    void buildTitle_region_fallback_사용() {
+        assertThat(svc.buildTitle("고기싸롱", "상계")).isEqualTo("고기싸롱 (상계)");
+    }
+
+    @Test
+    void buildTitle_이모지_미포함() {
+        assertThat(svc.buildTitle("마시타야", null)).doesNotContain("🍜").doesNotContain("💳");
+    }
+
+    @Test
+    void buildTitle_가게_미상() {
+        assertThat(svc.buildTitle(null, null)).isEqualTo("(가게 미상)");
+        assertThat(svc.buildTitle("", null)).isEqualTo("(가게 미상)");
     }
 }

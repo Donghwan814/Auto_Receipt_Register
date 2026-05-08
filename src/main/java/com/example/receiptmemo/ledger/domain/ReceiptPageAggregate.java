@@ -23,4 +23,6 @@ public class ReceiptPageAggregate {
     private String memo;
     private String warning;
     private String category;
+    /** Notion page icon 으로 쓸 이모지. title 에는 이모지 미포함. */
+    private String iconEmoji;
 }

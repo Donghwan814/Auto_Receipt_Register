@@ -59,12 +59,24 @@ public class NotionService {
     }
 
     /**
-     * 가계부 페이지에 항목/금액/날짜/카테고리/메모 컬럼을 일괄 업데이트.
+     * 가계부 페이지에 항목/금액/날짜/카테고리/메모 컬럼을 일괄 업데이트. (이모지 미설정)
      */
     public void updateExpensePage(String pageId, String title, Integer amount, LocalDate date,
                                   String category, String memo) {
+        updateExpensePage(pageId, title, amount, date, category, memo, null);
+    }
+
+    /**
+     * 가계부 페이지 일괄 업데이트 + 페이지 아이콘(이모지) 설정.
+     */
+    public void updateExpensePage(String pageId, String title, Integer amount, LocalDate date,
+                                  String category, String memo, String iconEmoji) {
         Map<String, Object> properties = buildExpenseProperties(title, amount, date, category, memo, /*setCreatedAt*/ false);
-        Map<String, Object> body = Map.of("properties", properties);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("properties", properties);
+        if (iconEmoji != null && !iconEmoji.isBlank()) {
+            body.put("icon", Map.of("type", "emoji", "emoji", iconEmoji));
+        }
 
         notionWebClient.patch()
                 .uri("/pages/{id}", pageId)
@@ -74,20 +86,30 @@ public class NotionService {
                 .bodyToMono(String.class)
                 .block();
 
-        log.info("[Notion] expense page updated. pageId={}, title={}, amount={}, category={}",
-                pageId, title, amount, category);
+        log.info("[Notion] expense page updated. pageId={}, title={}, amount={}, category={}, icon={}",
+                pageId, title, amount, category, iconEmoji);
     }
 
     /**
-     * 가계부 데이터베이스에 새 페이지를 생성한다. 생성된 pageId 반환.
+     * 가계부 데이터베이스에 새 페이지를 생성한다. 생성된 pageId 반환. (이모지 미설정)
      */
     public String createExpensePage(String title, Integer amount, LocalDate date,
                                     String category, String memo) {
+        return createExpensePage(title, amount, date, category, memo, null);
+    }
+
+    /**
+     * 새 페이지 + 페이지 아이콘(이모지) 설정.
+     */
+    public String createExpensePage(String title, Integer amount, LocalDate date,
+                                    String category, String memo, String iconEmoji) {
         Map<String, Object> properties = buildExpenseProperties(title, amount, date, category, memo, /*setCreatedAt*/ true);
-        Map<String, Object> body = Map.of(
-                "parent", Map.of("database_id", notionConfig.getDatabaseId()),
-                "properties", properties
-        );
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("parent", Map.of("database_id", notionConfig.getDatabaseId()));
+        body.put("properties", properties);
+        if (iconEmoji != null && !iconEmoji.isBlank()) {
+            body.put("icon", Map.of("type", "emoji", "emoji", iconEmoji));
+        }
 
         JsonNode created = notionWebClient.post()
                 .uri("/pages")

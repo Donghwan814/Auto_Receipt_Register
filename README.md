@@ -28,6 +28,44 @@ export GOOGLE_VISION_API_KEY=...   # ocr.engine=google 인 경우
 - Swagger UI: <http://localhost:8080/swagger-ui.html>
 - OCR 엔진 선택: `ocr.engine=mock | google | clova`
 
+## 운영 테스트 (Cloud Run + Notion Webhook)
+
+배포된 Cloud Run 인스턴스에서 Notion 댓글에 영수증을 올리면 자동으로 가계부 페이지가 채워지는지 검증한다.
+
+1. **배포**
+   - `./gradlew bootJar` 후 컨테이너 빌드 → Cloud Run 으로 배포.
+   - 환경변수: `NOTION_API_KEY`, `NOTION_DATABASE_ID`, `NOTION_WEBHOOK_VERIFICATION_TOKEN`,
+     `GOOGLE_VISION_API_KEY`, (선택) `NOTION_WEBHOOK_DEBUG_COMMENTS=true`.
+
+2. **Notion Webhook URL 등록**
+   - Notion Integration 설정 → Webhook URL 에 `https://<cloud-run-host>/api/notion/webhook` 등록.
+   - 처음 등록 시 `verification_token` 이 1회 echo 된다.
+
+3. **수동 처리/디버깅 (선택)**
+   - `GET /api/notion/comments/debug?pageId=...`        → Notion 댓글 raw JSON
+     (`NOTION_WEBHOOK_DEBUG_COMMENTS=true` 일 때만 활성)
+   - `POST /api/notion/comments/process?pageId=...`     → 해당 페이지의 댓글 첨부를 즉시 영수증 처리
+
+4. **자동 동작 시나리오**
+   1. Notion 가계부 데이터베이스에 새 row(페이지) 생성.
+   2. 그 페이지 댓글에 영수증 이미지(.jpg/.png/.webp) 업로드.
+   3. Notion → `comment.created` 웹훅이 Cloud Run 에 도착.
+   4. 서버가 `GET /v1/comments?block_id=...` 로 raw JSON 조회 → `attachments[].file.url` 추출.
+      - 첫 조회에서 attachments 가 비어있으면 2초/5초 후 재시도.
+   5. 이미지 다운로드 → Google Vision OCR → 영수증 파싱.
+   6. 페이지에 다음을 일괄 업데이트:
+      - 항목/제목: `{가게명} ({지역명})` (이모지 없음)
+      - 금액: 합계 라벨 기준 (사업자번호/카드번호/승인번호 제외)
+      - 날짜, 카테고리, 메모(메뉴 + 합산)
+      - **page icon: 카테고리/키워드 기반 이모지** (☕ 🥯 🐷 🍜 🍿 🅿️ 🛍️ 💳)
+   7. 같은 이미지를 다시 올려도 SHA-256 hash 로 중복 차단 → 금액 중복 합산 없음.
+
+5. **검증 체크리스트**
+   - [ ] 너구리베이글 영수증 업로드 → title=`너구리베이글 (팝업)`, icon=`🥯`, amount=`3,500`
+   - [ ] 메가MGC 커피 영수증 업로드 → icon=`☕`, amount=`합계 라벨 값`
+   - [ ] 동일 이미지 재업로드 → amount 중복 합산 없음
+   - [ ] Cloud Run 로그에서 `[Webhook] 처리 시작 ... [Attachment] 다운로드 성공 ... [Notion] expense page updated` 가 차례로 보임
+
 ## 사용 흐름
 
 ### 1. 새 가게 영수증 — `POST /api/receipts/create-page`

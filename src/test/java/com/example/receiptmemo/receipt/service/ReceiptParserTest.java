@@ -217,4 +217,113 @@ class ReceiptParserTest {
         assertThat(r.getItems()).isEmpty();
         assertThat(r.getMemo()).isEmpty();
     }
+
+    // ---------- amount / merchant 정밀 파싱 ----------
+
+    private static final String NEOGURI_BAGEL_RAW = """
+            TIMES SQUARE
+            너구리베이글(팝업)
+            105-18-88121 TEL:02-333-1775 강병철 외
+            1명
+            서울특별시 마포구 양화로6길 49
+            POS: 001
+            BILL: 0000123
+            상품명         수량  금액
+            플레인 베이글     1   3,500
+            부가세 과세 물품가액      3,182
+            부가세                     318
+            합계: 3,500
+            받을금액: 3,500
+            받은금액: 3,500
+            카드결제: 3,500
+            카드번호: 510737******9124
+            승인번호: 05303998
+            """;
+
+    @Test
+    void 너구리베이글_amount는_3500() {
+        ReceiptParseResult r = parser.parse(NEOGURI_BAGEL_RAW);
+        assertThat(r.getTotalAmount()).isEqualTo(3500);
+    }
+
+    @Test
+    void 너구리베이글_merchant_추출() {
+        ReceiptParseResult r = parser.parse(NEOGURI_BAGEL_RAW);
+        assertThat(r.getExtractedMerchant()).isEqualTo("너구리베이글(팝업)");
+    }
+
+    @Test
+    void 너구리베이글_TIMES_SQUARE는_merchant_아님() {
+        ReceiptParseResult r = parser.parse(NEOGURI_BAGEL_RAW);
+        assertThat(r.getExtractedMerchant()).doesNotContainIgnoringCase("TIMES");
+        assertThat(r.getExtractedMerchant()).doesNotContainIgnoringCase("SQUARE");
+    }
+
+    @Test
+    void 승인번호_05303998은_amount로_선택되지_않음() {
+        ReceiptParseResult r = parser.parse(NEOGURI_BAGEL_RAW);
+        assertThat(r.getTotalAmount()).isNotEqualTo(5303998);
+        assertThat(r.getTotalAmount()).isNotEqualTo(5_303_998);
+    }
+
+    @Test
+    void 카드번호_510737은_amount로_선택되지_않음() {
+        ReceiptParseResult r = parser.parse(NEOGURI_BAGEL_RAW);
+        assertThat(r.getTotalAmount()).isLessThan(1_000_000);
+    }
+
+    @Test
+    void WARN_같은_OCR_노이즈는_merchant로_선택안함() {
+        String raw = """
+                WARN
+                메가MGC 커피 영등포역점
+                123-45-67890 TEL:02-1234-5678
+                상품명 수량 금액
+                아메리카노 1 2,000
+                합계 5,500
+                """;
+        ReceiptParseResult r = parser.parse(raw);
+        assertThat(r.getExtractedMerchant()).isEqualTo("메가MGC 커피 영등포역점");
+        assertThat(r.getTotalAmount()).isEqualTo(5500);
+    }
+
+    @Test
+    void 메가커피_합계_기준_amount_5500() {
+        String raw = """
+                메가MGC 커피 영등포역점
+                123-45-67890
+                TEL: 02-1234-5678
+                상품명         수량   금액
+                카페라떼          1   5,500
+                부가세 과세 물품가액 5,000
+                부가세                500
+                합계: 5,500
+                받을금액: 5,500
+                """;
+        ReceiptParseResult r = parser.parse(raw);
+        assertThat(r.getTotalAmount()).isEqualTo(5500);
+        assertThat(r.getExtractedMerchant()).isEqualTo("메가MGC 커피 영등포역점");
+    }
+
+    @Test
+    void 라벨_같은_줄_콜론_뒤_금액_매칭() {
+        String raw = "합계: 12,300";
+        assertThat(parser.parse(raw).getTotalAmount()).isEqualTo(12300);
+    }
+
+    @Test
+    void 라벨_사이_공백_허용() {
+        String raw = """
+                합 계 : 7,800
+                """;
+        assertThat(parser.parse(raw).getTotalAmount()).isEqualTo(7800);
+    }
+
+    @Test
+    void 백만원_이상은_amount로_채택하지_않음() {
+        String raw = """
+                합계: 12,345,678
+                """;
+        assertThat(parser.parse(raw).getTotalAmount()).isNull();
+    }
 }

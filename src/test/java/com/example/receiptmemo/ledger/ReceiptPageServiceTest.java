@@ -75,25 +75,25 @@ class ReceiptPageServiceTest {
     @Test
     void 마시타야_영수증_1개_create_page() {
         when(ocrService.extractText(any())).thenReturn(MASIRAMEN_1);
-        when(notionService.createExpensePage(anyString(), anyInt(), any(), anyString(), anyString())).thenReturn("new-page-1");
+        when(notionService.createExpensePage(anyString(), anyInt(), any(), anyString(), anyString(), anyString())).thenReturn("new-page-1");
 
         CreateReceiptPageResponse resp = service.createPage(List.of(file("a.jpg", "a".getBytes())), null);
 
         assertThat(resp.isSuccess()).isTrue();
         assertThat(resp.getPageId()).isEqualTo("new-page-1");
-        assertThat(resp.getTitle()).isEqualTo("🍜 마시타야");
+        assertThat(resp.getTitle()).isEqualTo("마시타야");
+        assertThat(resp.getTitle()).doesNotContain("🍜");
         assertThat(resp.getTotalAmount()).isEqualTo(25000);
         assertThat(resp.getMemo()).isEqualTo("블랙라멘 + 시오라멘 + 공기밥");
         assertThat(resp.getDate()).isEqualTo(LocalDate.of(2026, 5, 3));
 
-        verify(notionService).createExpensePage(eq("🍜 마시타야"), eq(25000), eq(LocalDate.of(2026,5,3)),
-                eq("식비"), eq("블랙라멘 + 시오라멘 + 공기밥"));
-        verify(notionService).updateExpensePage(eq("new-page-1"), anyString(), anyInt(), any(), anyString(), anyString());
+        verify(notionService).createExpensePage(eq("마시타야"), eq(25000), eq(LocalDate.of(2026,5,3)),
+                eq("식비"), eq("블랙라멘 + 시오라멘 + 공기밥"), eq("🍜"));
+        verify(notionService).updateExpensePage(eq("new-page-1"), anyString(), anyInt(), any(), anyString(), anyString(), anyString());
     }
 
     @Test
     void 같은_pageId_에_영수증_2개_금액_메모_합산() {
-        // 두 OCR 결과를 순서대로 반환
         when(ocrService.extractText(any())).thenReturn(MASIRAMEN_1, MASIRAMEN_2);
 
         AddReceiptsToPageResponse resp = service.addReceiptsToPage(
@@ -103,13 +103,14 @@ class ReceiptPageServiceTest {
 
         assertThat(resp.getTotalAmount()).isEqualTo(33500);
         assertThat(resp.getMemo()).isEqualTo("블랙라멘 + 시오라멘 + 공기밥 + 제로콜라 + 교자");
-        assertThat(resp.getTitle()).isEqualTo("🍜 마시타야");
+        assertThat(resp.getTitle()).isEqualTo("마시타야");
         assertThat(resp.getDate()).isEqualTo(LocalDate.of(2026, 5, 3));
         assertThat(resp.getReceipts()).hasSize(2);
         assertThat(resp.getReceipts()).allMatch(r -> !r.isDuplicated());
 
-        verify(notionService).updateExpensePage(eq("page-MM"), eq("🍜 마시타야"), eq(33500),
-                eq(LocalDate.of(2026,5,3)), eq("식비"), eq("블랙라멘 + 시오라멘 + 공기밥 + 제로콜라 + 교자"));
+        verify(notionService).updateExpensePage(eq("page-MM"), eq("마시타야"), eq(33500),
+                eq(LocalDate.of(2026,5,3)), eq("식비"),
+                eq("블랙라멘 + 시오라멘 + 공기밥 + 제로콜라 + 교자"), eq("🍜"));
     }
 
     @Test
@@ -180,7 +181,7 @@ class ReceiptPageServiceTest {
         assertThat(resp.isSuccess()).isFalse();
         assertThat(resp.isRejected()).isTrue();
         assertThat(resp.getPageId()).isNull();
-        verify(notionService, never()).createExpensePage(anyString(), anyInt(), any(), anyString(), anyString());
+        verify(notionService, never()).createExpensePage(anyString(), anyInt(), any(), anyString(), anyString(), anyString());
     }
 
     @Test
@@ -189,7 +190,7 @@ class ReceiptPageServiceTest {
 
         service.addReceiptsToPage("page-EXIST", List.of(file("a.jpg","a".getBytes())), null);
 
-        verify(notionService).updateExpensePage(eq("page-EXIST"), anyString(), eq(25000), any(), anyString(), anyString());
-        verify(notionService, never()).createExpensePage(anyString(), anyInt(), any(), anyString(), anyString());
+        verify(notionService).updateExpensePage(eq("page-EXIST"), anyString(), eq(25000), any(), anyString(), anyString(), anyString());
+        verify(notionService, never()).createExpensePage(anyString(), anyInt(), any(), anyString(), anyString(), anyString());
     }
 }

@@ -161,7 +161,7 @@ public class ReceiptPageService {
 
         String newPageId = notionService.createExpensePage(
                 preAgg.getTitle(), preAgg.getAmount(), preAgg.getDate(),
-                preAgg.getCategory(), preAgg.getMemo());
+                preAgg.getCategory(), preAgg.getMemo(), preAgg.getIconEmoji());
 
         // DB 에 영수증 저장 (실제 pageId 로). 같은 파일 hash 가 새 pageId 와 충돌할 일은 없음.
         for (ReceiptAnalysisResult r : analyzed) {
@@ -200,7 +200,7 @@ public class ReceiptPageService {
         }
         ReceiptPageAggregate agg = aggregationService.aggregate(rows, fallbackDate);
         notionService.updateExpensePage(pageId, agg.getTitle(), agg.getAmount(), agg.getDate(),
-                agg.getCategory(), agg.getMemo());
+                agg.getCategory(), agg.getMemo(), agg.getIconEmoji());
 
         return AddReceiptsToPageResponse.builder()
                 .success(true)
@@ -221,7 +221,7 @@ public class ReceiptPageService {
         ReceiptPageAggregate agg = aggregationService.aggregate(rows, fallbackDate);
         try {
             notionService.updateExpensePage(pageId, agg.getTitle(), agg.getAmount(), agg.getDate(),
-                    agg.getCategory(), agg.getMemo());
+                    agg.getCategory(), agg.getMemo(), agg.getIconEmoji());
         } catch (Exception e) {
             if (justCreated) throw e; // 방금 만든 페이지를 갱신하지 못하면 명백한 오류
             log.warn("[ReceiptPageService] Notion 업데이트 실패 (집계는 완료됨): {}", e.getMessage());

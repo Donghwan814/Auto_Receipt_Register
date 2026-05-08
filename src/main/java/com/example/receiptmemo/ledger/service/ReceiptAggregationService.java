@@ -43,9 +43,10 @@ public class ReceiptAggregationService {
 
         String merchant = pickMerchant(rows);
         String memo = mergeMemos(rows);
-        String title = emojiTitleService.build(merchant, memo);
         String warning = detectMixedMerchantWarning(rows);
         String category = categoryClassifier.classify(merchant, memo);
+        String title = emojiTitleService.buildTitle(merchant, null);
+        String iconEmoji = emojiTitleService.resolveIcon(merchant, memo, category);
 
         return ReceiptPageAggregate.builder()
                 .title(title)
@@ -55,6 +56,7 @@ public class ReceiptAggregationService {
                 .memo(memo)
                 .warning(warning)
                 .category(category)
+                .iconEmoji(iconEmoji)
                 .build();
     }
 

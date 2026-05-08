@@ -30,6 +30,9 @@ public class NotionWebhookService {
     private final ReceiptPageService receiptPageService;
     private final WebhookEventLogRepository eventLogRepository;
 
+    /** 재시도 딜레이(ms). 테스트에서 0으로 덮어쓸 수 있도록 final 아닌 필드. */
+    long[] retryDelaysMs = {0L, 2000L, 5000L};
+
     @Transactional
     public WebhookResult handle(JsonNode payload) {
         if (payload == null || payload.isNull() || payload.isEmpty()) {
@@ -62,6 +65,7 @@ public class NotionWebhookService {
         log.info("[Webhook] 처리 시작. type={}, eventId={}, pageId={}, commentId={}",
                 eventType, dedupKey, pageId, commentId);
 
+<<<<<<< ours
         // 댓글 raw JSON 조회
         String rawJson;
         try {
@@ -75,6 +79,11 @@ public class NotionWebhookService {
         List<ReceiptAttachmentService.ImageRef> refs =
                 attachmentService.extractImageAttachmentsFromRaw(rawJson, commentId);
 
+=======
+        // 댓글 raw JSON 조회 + 첨부 추출 (즉시 / 2s / 5s 재시도).
+        // comment.created 직후 attachments 가 비어있을 수 있어 짧은 retry 가 필요하다.
+        List<ReceiptAttachmentService.ImageRef> refs = fetchAttachmentsWithRetry(pageId, commentId);
+>>>>>>> theirs
         List<MultipartFile> files = attachmentService.downloadAll(refs);
         if (files.isEmpty()) {
             log.info("[Webhook] 이미지 첨부 없음. pageId={}", pageId);
@@ -91,6 +100,32 @@ public class NotionWebhookService {
 
         recordEvent(dedupKey, eventType, pageId, commentId);
         return WebhookResult.ok("processed");
+    }
+
+    /** comment.created 등에서 attachments 가 늦게 붙는 케이스를 위해 즉시/2s/5s 로 retry. */
+    private List<ReceiptAttachmentService.ImageRef> fetchAttachmentsWithRetry(String pageId, String commentId) {
+        long[] delays = retryDelaysMs;
+        List<ReceiptAttachmentService.ImageRef> last = List.of();
+        for (int attempt = 0; attempt < delays.length; attempt++) {
+            if (delays[attempt] > 0) {
+                try { Thread.sleep(delays[attempt]); }
+                catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+            }
+            String rawJson;
+            try {
+                rawJson = notionService.listCommentsRaw(pageId);
+            } catch (Exception e) {
+                log.error("[Webhook] 댓글 조회 실패. attempt={}, pageId={}, err={}", attempt, pageId, e.getMessage());
+                continue;
+            }
+            last = attachmentService.extractImageAttachmentsFromRaw(rawJson, commentId);
+            if (!last.isEmpty()) {
+                if (attempt > 0) log.info("[Webhook] retry 성공 (attempt={}). count={}", attempt, last.size());
+                return last;
+            }
+            log.info("[Webhook] attachments 비어있음 (attempt={}). retry 예정.", attempt);
+        }
+        return last;
     }
 
     private void recordEvent(String eventId, String eventType, String pageId, String commentId) {
