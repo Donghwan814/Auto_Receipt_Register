@@ -19,7 +19,7 @@ notion:
   webhook:
     verification-token: ${NOTION_WEBHOOK_VERIFICATION_TOKEN:}
     strict-signature-check: false
-    debug-comments: false
+    debug-comments: ${NOTION_WEBHOOK_DEBUG_COMMENTS:false}
 
 ocr:
   engine: google

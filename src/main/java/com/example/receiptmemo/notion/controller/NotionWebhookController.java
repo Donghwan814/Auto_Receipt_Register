@@ -1,7 +1,5 @@
 package com.example.receiptmemo.notion.controller;
 
-import com.example.receiptmemo.global.config.NotionConfig;
-import com.example.receiptmemo.notion.service.NotionService;
 import com.example.receiptmemo.notion.service.NotionWebhookService;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.swagger.v3.oas.annotations.Operation;
@@ -22,8 +20,6 @@ import java.util.Map;
 public class NotionWebhookController {
 
     private final NotionWebhookService webhookService;
-    private final NotionService notionService;
-    private final NotionConfig notionConfig;
 
     @Operation(summary = "Notion 웹훅 수신")
     @PostMapping("/webhook")
@@ -38,14 +34,5 @@ public class NotionWebhookController {
         body.put("ok", true);
         body.put("message", result.message);
         return ResponseEntity.ok(body);
-    }
-
-    @Operation(summary = "[Debug] Notion 페이지의 raw 댓글 JSON 조회")
-    @GetMapping("/comments/debug")
-    public ResponseEntity<?> debugComments(@RequestParam String pageId) {
-        if (!notionConfig.isDebugComments()) {
-            return ResponseEntity.status(404).body(Map.of("error", "not found"));
-        }
-        return ResponseEntity.ok(notionService.listCommentsRaw(pageId));
     }
 }

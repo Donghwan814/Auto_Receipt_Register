@@ -1,7 +1,6 @@
 package com.example.receiptmemo.notion.service;
 
 import com.example.receiptmemo.ledger.service.ReceiptPageService;
-import com.example.receiptmemo.notion.dto.api.NotionCommentResponse;
 import com.example.receiptmemo.notion.persistence.WebhookEventLog;
 import com.example.receiptmemo.notion.persistence.WebhookEventLogRepository;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -11,14 +10,14 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.util.ArrayList;
 import java.util.List;
 
 /**
  * Notion 웹훅 처리.
  *  - verification_token : echo
  *  - comment.created / comment.updated : pageId+commentId 추출 후 첨부 처리
- *  - page.content_updated : log only
+ *  - page.content_updated : pageId 가 있으면 댓글 첨부 재시도 (중복은 fileHash 로 차단)
+ *  - file_upload.completed : pageId 가 있으면 동일 처리
  *  - 중복 eventId 는 skip
  */
 @Slf4j
@@ -37,7 +36,6 @@ public class NotionWebhookService {
             return WebhookResult.ok("empty payload");
         }
 
-        // 1) verification token (Notion 웹훅 검증)
         if (payload.has("verification_token")) {
             String token = payload.get("verification_token").asText();
             log.info("[Webhook] verification_token 수신. token={}", token);
@@ -47,14 +45,6 @@ public class NotionWebhookService {
         String eventType = textOrNull(payload, "type");
         String eventId = resolveEventId(payload);
 
-        // page.content_updated 등은 단순 로그
-        if (eventType != null && eventType.startsWith("page.")) {
-            log.info("[Webhook] page event 수신 (스텁). type={}, eventId={}", eventType, eventId);
-            recordEvent(eventId, eventType, null, null);
-            return WebhookResult.ok("page event logged");
-        }
-
-        // pageId / commentId 추출
         String pageId = extractPageId(payload);
         String commentId = extractCommentId(payload);
 
@@ -63,7 +53,6 @@ public class NotionWebhookService {
             return WebhookResult.ok("no pageId");
         }
 
-        // dedup
         String dedupKey = eventId != null ? eventId : fallbackKey(pageId, commentId, payload);
         if (dedupKey != null && eventLogRepository.existsByEventId(dedupKey)) {
             log.info("[Webhook] 중복 이벤트, 스킵. eventId={}", dedupKey);
@@ -73,30 +62,20 @@ public class NotionWebhookService {
         log.info("[Webhook] 처리 시작. type={}, eventId={}, pageId={}, commentId={}",
                 eventType, dedupKey, pageId, commentId);
 
-        // 댓글 목록 조회 -> 이미지 첨부 다운로드
-        List<NotionCommentResponse> comments;
+        // 댓글 raw JSON 조회
+        String rawJson;
         try {
-            comments = notionService.listComments(pageId);
+            rawJson = notionService.listCommentsRaw(pageId);
         } catch (Exception e) {
             log.error("[Webhook] 댓글 조회 실패. pageId={}, err={}", pageId, e.getMessage());
             return WebhookResult.ok("comment fetch failed");
         }
 
-        List<NotionCommentResponse> targetComments;
-        if (commentId != null && !commentId.isBlank()) {
-            targetComments = new ArrayList<>();
-            for (NotionCommentResponse c : comments) {
-                if (commentId.equals(c.getId())) targetComments.add(c);
-            }
-            if (targetComments.isEmpty()) {
-                log.warn("[Webhook] commentId={} 가 댓글 목록에 없음 (전체 처리).", commentId);
-                targetComments = comments;
-            }
-        } else {
-            targetComments = comments;
-        }
+        // 이미지 첨부 추출 (commentId 가 있으면 해당 댓글 우선, 없으면 fallback)
+        List<ReceiptAttachmentService.ImageRef> refs =
+                attachmentService.extractImageAttachmentsFromRaw(rawJson, commentId);
 
-        List<MultipartFile> files = attachmentService.downloadAllImages(targetComments);
+        List<MultipartFile> files = attachmentService.downloadAll(refs);
         if (files.isEmpty()) {
             log.info("[Webhook] 이미지 첨부 없음. pageId={}", pageId);
             recordEvent(dedupKey, eventType, pageId, commentId);
@@ -143,7 +122,6 @@ public class NotionWebhookService {
     }
 
     private String extractPageId(JsonNode p) {
-        // entity.id (page) 또는 data.parent.id 또는 data.page_id
         JsonNode entity = p.path("entity");
         if (entity.isObject()) {
             String type = entity.path("type").asText("");
@@ -165,7 +143,6 @@ public class NotionWebhookService {
                 }
             }
         }
-        // top-level page_id
         String top = textOrNull(p, "page_id");
         if (top != null) return top;
         return null;

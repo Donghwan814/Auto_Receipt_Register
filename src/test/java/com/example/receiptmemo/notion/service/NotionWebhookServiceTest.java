@@ -1,8 +1,6 @@
 package com.example.receiptmemo.notion.service;
 
 import com.example.receiptmemo.ledger.service.ReceiptPageService;
-import com.example.receiptmemo.notion.dto.api.NotionCommentAttachmentResponse;
-import com.example.receiptmemo.notion.dto.api.NotionCommentResponse;
 import com.example.receiptmemo.notion.persistence.WebhookEventLog;
 import com.example.receiptmemo.notion.persistence.WebhookEventLogRepository;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -11,7 +9,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.util.ArrayList;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -27,9 +24,27 @@ class NotionWebhookServiceTest {
     private NotionWebhookService webhook;
     private final ObjectMapper om = new ObjectMapper();
 
+    private static final String RAW_WITH_IMAGE = """
+            {
+              "object":"list",
+              "results":[
+                {"object":"comment","id":"cmt-9",
+                 "parent":{"type":"page_id","page_id":"page-1"},
+                 "attachments":[
+                   {"category":"image",
+                    "file":{"url":"https://prod-files-secure.s3/foo.png","expiry_time":"2026-05-08T08:59:45.397Z"}}
+                 ]}
+              ]
+            }
+            """;
+
+    private static final String RAW_EMPTY = "{\"object\":\"list\",\"results\":[]}";
+
     @BeforeEach
     void setUp() {
         notionService = mock(NotionService.class);
+        attachmentService = mock(ReceiptAttachmentService.class, CALLS_REAL_METHODS);
+        // override constructor-only dependencies — use a fresh real-ish mock built around a real impl:
         attachmentService = mock(ReceiptAttachmentService.class);
         receiptPageService = mock(ReceiptPageService.class);
         repo = mock(WebhookEventLogRepository.class);
@@ -50,19 +65,22 @@ class NotionWebhookServiceTest {
     }
 
     @Test
-    void comment_created_에서_pageId_commentId_추출() throws Exception {
+    void comment_created_에서_pageId_commentId_추출후_처리() throws Exception {
         JsonNode p = payload("""
                 {"id":"evt-1","type":"comment.created",
                  "entity":{"type":"comment","id":"cmt-9"},
                  "data":{"page_id":"page-1"}}
                 """);
 
-        when(notionService.listComments("page-1")).thenReturn(comments("cmt-9", "https://files/foo.png"));
-        when(attachmentService.downloadAllImages(anyList())).thenReturn(List.<MultipartFile>of(mock(MultipartFile.class)));
+        when(notionService.listCommentsRaw("page-1")).thenReturn(RAW_WITH_IMAGE);
+        when(attachmentService.extractImageAttachmentsFromRaw(RAW_WITH_IMAGE, "cmt-9"))
+                .thenReturn(List.of(new ReceiptAttachmentService.ImageRef(
+                        "https://prod-files-secure.s3/foo.png", "foo.png", "image/png")));
+        when(attachmentService.downloadAll(anyList())).thenReturn(List.of(mock(MultipartFile.class)));
 
         webhook.handle(p);
 
-        verify(notionService).listComments("page-1");
+        verify(notionService).listCommentsRaw("page-1");
         verify(receiptPageService).addReceiptsToPage(eq("page-1"), anyList(), isNull());
         verify(repo).save(any(WebhookEventLog.class));
     }
@@ -89,8 +107,9 @@ class NotionWebhookServiceTest {
                  "entity":{"type":"comment","id":"c2"},
                  "data":{"page_id":"page-2"}}
                 """);
-        when(notionService.listComments("page-2")).thenReturn(List.of());
-        when(attachmentService.downloadAllImages(anyList())).thenReturn(List.of());
+        when(notionService.listCommentsRaw("page-2")).thenReturn(RAW_EMPTY);
+        when(attachmentService.extractImageAttachmentsFromRaw(RAW_EMPTY, "c2")).thenReturn(List.of());
+        when(attachmentService.downloadAll(anyList())).thenReturn(List.of());
 
         webhook.handle(p);
 
@@ -105,32 +124,20 @@ class NotionWebhookServiceTest {
     }
 
     @Test
-    void 이미지_있을때_addReceiptsToPage_호출() throws Exception {
+    void page_content_updated_에서도_pageId_있으면_댓글_재시도() throws Exception {
         JsonNode p = payload("""
-                {"id":"evt-4","type":"comment.created",
-                 "entity":{"type":"comment","id":"c4"},
-                 "data":{"page_id":"page-4"}}
+                {"id":"evt-pc","type":"page.content_updated",
+                 "entity":{"type":"page","id":"page-7"}}
                 """);
-        when(notionService.listComments("page-4")).thenReturn(comments("c4", "https://x/a.jpg"));
-        MultipartFile mf = mock(MultipartFile.class);
-        when(attachmentService.downloadAllImages(anyList())).thenReturn(List.of(mf));
+        when(notionService.listCommentsRaw("page-7")).thenReturn(RAW_WITH_IMAGE);
+        when(attachmentService.extractImageAttachmentsFromRaw(eq(RAW_WITH_IMAGE), isNull()))
+                .thenReturn(List.of(new ReceiptAttachmentService.ImageRef(
+                        "https://prod-files-secure.s3/foo.png", "foo.png", "image/png")));
+        when(attachmentService.downloadAll(anyList())).thenReturn(List.of(mock(MultipartFile.class)));
 
         webhook.handle(p);
 
-        verify(receiptPageService).addReceiptsToPage(eq("page-4"), anyList(), isNull());
-    }
-
-    private List<NotionCommentResponse> comments(String id, String fileUrl) {
-        NotionCommentResponse c = new NotionCommentResponse();
-        c.setId(id);
-        NotionCommentAttachmentResponse a = new NotionCommentAttachmentResponse();
-        NotionCommentAttachmentResponse.FileBody fb = new NotionCommentAttachmentResponse.FileBody();
-        fb.setUrl(fileUrl);
-        a.setFile(fb);
-        a.setCategory("image");
-        List<NotionCommentAttachmentResponse> attachments = new ArrayList<>();
-        attachments.add(a);
-        c.setAttachments(attachments);
-        return List.of(c);
+        verify(notionService).listCommentsRaw("page-7");
+        verify(receiptPageService).addReceiptsToPage(eq("page-7"), anyList(), isNull());
     }
 }

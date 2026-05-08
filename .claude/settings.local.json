@@ -12,7 +12,10 @@
       "PowerShell(Get-Process java -ErrorAction SilentlyContinue)",
       "PowerShell(Get-Process | Where-Object {$_.ProcessName -match 'java|gradle'} | Select-Object Id, ProcessName, StartTime)",
       "Bash(./gradlew compileJava compileTestJava --no-daemon)",
-      "Bash(./gradlew bootJar --no-daemon)"
+      "Bash(./gradlew bootJar --no-daemon)",
+      "Bash(tasklist)",
+      "Bash(taskkill /PID 21208 /F)",
+      "PowerShell(Stop-Process -Id 21208 -Force)"
     ]
   }
 }

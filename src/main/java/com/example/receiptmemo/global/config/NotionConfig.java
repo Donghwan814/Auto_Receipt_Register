@@ -32,8 +32,12 @@ public class NotionConfig {
     /** 웹훅 인증 옵션 */
     private Webhook webhook = new Webhook();
 
-    /** 디버그용 raw comments 엔드포인트 활성화 여부 */
+    /** (deprecated) 디버그용 raw comments 엔드포인트 활성화 여부. webhook.debugComments 를 사용하세요. */
     private boolean debugComments = false;
+
+    public boolean isDebugComments() {
+        return debugComments || (webhook != null && webhook.isDebugComments());
+    }
 
     @Getter
     @Setter
@@ -52,5 +56,9 @@ public class NotionConfig {
     @Setter
     public static class Webhook {
         private String secret;
+        private String verificationToken;
+        private boolean strictSignatureCheck = false;
+        /** 디버그용 raw comments 엔드포인트 활성화 여부 (NOTION_WEBHOOK_DEBUG_COMMENTS) */
+        private boolean debugComments = false;
     }
 }

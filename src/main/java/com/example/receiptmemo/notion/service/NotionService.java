@@ -144,13 +144,13 @@ public class NotionService {
         return props;
     }
 
-    /** 페이지의 댓글 목록 조회 (raw JsonNode 반환). */
-    public JsonNode listCommentsRaw(String pageId) {
+    /** 페이지의 댓글 목록 조회 (Notion API 원본 JSON 문자열 반환). */
+    public String listCommentsRaw(String pageId) {
         return notionWebClient.get()
                 .uri(uriBuilder -> uriBuilder.path("/comments").queryParam("block_id", pageId).build())
                 .retrieve()
                 .onStatus(HttpStatusCode::isError, this::toError)
-                .bodyToMono(JsonNode.class)
+                .bodyToMono(String.class)
                 .block();
     }
 
