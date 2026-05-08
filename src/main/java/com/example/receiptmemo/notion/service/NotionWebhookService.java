@@ -65,25 +65,9 @@ public class NotionWebhookService {
         log.info("[Webhook] 처리 시작. type={}, eventId={}, pageId={}, commentId={}",
                 eventType, dedupKey, pageId, commentId);
 
-<<<<<<< ours
-        // 댓글 raw JSON 조회
-        String rawJson;
-        try {
-            rawJson = notionService.listCommentsRaw(pageId);
-        } catch (Exception e) {
-            log.error("[Webhook] 댓글 조회 실패. pageId={}, err={}", pageId, e.getMessage());
-            return WebhookResult.ok("comment fetch failed");
-        }
-
-        // 이미지 첨부 추출 (commentId 가 있으면 해당 댓글 우선, 없으면 fallback)
-        List<ReceiptAttachmentService.ImageRef> refs =
-                attachmentService.extractImageAttachmentsFromRaw(rawJson, commentId);
-
-=======
         // 댓글 raw JSON 조회 + 첨부 추출 (즉시 / 2s / 5s 재시도).
         // comment.created 직후 attachments 가 비어있을 수 있어 짧은 retry 가 필요하다.
         List<ReceiptAttachmentService.ImageRef> refs = fetchAttachmentsWithRetry(pageId, commentId);
->>>>>>> theirs
         List<MultipartFile> files = attachmentService.downloadAll(refs);
         if (files.isEmpty()) {
             log.info("[Webhook] 이미지 첨부 없음. pageId={}", pageId);
