@@ -30,8 +30,11 @@ public class NotionWebhookService {
     private final ReceiptPageService receiptPageService;
     private final WebhookEventLogRepository eventLogRepository;
 
-    /** 재시도 딜레이(ms). 테스트에서 0으로 덮어쓸 수 있도록 final 아닌 필드. */
-    long[] retryDelaysMs = {0L, 2000L, 5000L};
+    /**
+     * 재시도 딜레이(ms). 테스트에서 0으로 덮어쓸 수 있도록 final 아닌 필드.
+     * Android Notion 등 늦게 attachments/blocks 가 반영되는 케이스에 대비하여 최대 ~40s.
+     */
+    long[] retryDelaysMs = {0L, 2000L, 5000L, 10000L, 20000L, 40000L};
 
     @Transactional
     public WebhookResult handle(JsonNode payload) {
@@ -65,29 +68,41 @@ public class NotionWebhookService {
         log.info("[Webhook] 처리 시작. type={}, eventId={}, pageId={}, commentId={}",
                 eventType, dedupKey, pageId, commentId);
 
-        // 댓글 raw JSON 조회 + 첨부 추출 (즉시 / 2s / 5s 재시도).
-        // comment.created 직후 attachments 가 비어있을 수 있어 짧은 retry 가 필요하다.
+        // 이미지 수집: 댓글 attachments + 페이지 block 본문 이미지를 병합해서 retry.
+        // Android Notion 등에서 댓글 attachments 가 늦게 반영되거나, 본문 image block 으로
+        // 들어오는 케이스를 모두 잡기 위함.
         List<ReceiptAttachmentService.ImageRef> refs = fetchAttachmentsWithRetry(pageId, commentId);
-        List<MultipartFile> files = attachmentService.downloadAll(refs);
-        if (files.isEmpty()) {
+        if (refs == null || refs.isEmpty()) {
             log.info("[Webhook] 이미지 첨부 없음. pageId={}", pageId);
             recordEvent(dedupKey, eventType, pageId, commentId);
             return WebhookResult.ok("no attachments");
         }
+        List<MultipartFile> files = attachmentService.downloadAll(refs);
+        if (files == null || files.isEmpty()) {
+            log.info("[Webhook] 다운로드된 이미지 없음. pageId={}, refs={}", pageId, refs.size());
+            recordEvent(dedupKey, eventType, pageId, commentId);
+            return WebhookResult.ok("no downloads");
+        }
 
         try {
-            receiptPageService.addReceiptsToPage(pageId, files, null);
-            log.info("[Webhook] 영수증 처리 완료. pageId={}, count={}", pageId, files.size());
+            // resync: 현재 페이지에 존재하는 이미지를 source of truth 로 보고 재집계.
+            // 사용자가 영수증을 삭제/교체한 경우에도 안정적으로 동기화된다.
+            receiptPageService.resyncReceiptsForPage(pageId, files, null);
+            log.info("[Webhook] 영수증 resync 완료. pageId={}, count={}", pageId, files.size());
         } catch (Exception e) {
-            log.error("[Webhook] addReceiptsToPage 실패. pageId={}, err={}", pageId, e.getMessage(), e);
+            log.error("[Webhook] resyncReceiptsForPage 실패. pageId={}, err={}", pageId, e.getMessage(), e);
         }
 
         recordEvent(dedupKey, eventType, pageId, commentId);
         return WebhookResult.ok("processed");
     }
 
-    /** comment.created 등에서 attachments 가 늦게 붙는 케이스를 위해 즉시/2s/5s 로 retry. */
-    private List<ReceiptAttachmentService.ImageRef> fetchAttachmentsWithRetry(String pageId, String commentId) {
+    /**
+     * 댓글 attachments + page blocks 를 모두 조회해 이미지 후보를 수집한다.
+     * retry 는 retryDelaysMs (즉시 / 2s / 5s / 10s / 20s / 40s) 로 최대 ~40s.
+     * 어떤 retry 에서든 최소 1개 이상 이미지가 잡히면 즉시 반환.
+     */
+    List<ReceiptAttachmentService.ImageRef> fetchAttachmentsWithRetry(String pageId, String commentId) {
         long[] delays = retryDelaysMs;
         List<ReceiptAttachmentService.ImageRef> last = List.of();
         for (int attempt = 0; attempt < delays.length; attempt++) {
@@ -95,21 +110,47 @@ public class NotionWebhookService {
                 try { Thread.sleep(delays[attempt]); }
                 catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
             }
-            String rawJson;
+
+            List<ReceiptAttachmentService.ImageRef> commentRefs = List.of();
+            List<ReceiptAttachmentService.ImageRef> blockRefs = List.of();
             try {
-                rawJson = notionService.listCommentsRaw(pageId);
+                String commentsRaw = notionService.listCommentsRaw(pageId);
+                commentRefs = attachmentService.extractImageAttachmentsFromRaw(commentsRaw, commentId);
             } catch (Exception e) {
-                log.error("[Webhook] 댓글 조회 실패. attempt={}, pageId={}, err={}", attempt, pageId, e.getMessage());
-                continue;
+                log.warn("[Webhook] 댓글 조회 실패. attempt={}, pageId={}, err={}", attempt, pageId, e.getMessage());
             }
-            last = attachmentService.extractImageAttachmentsFromRaw(rawJson, commentId);
-            if (!last.isEmpty()) {
-                if (attempt > 0) log.info("[Webhook] retry 성공 (attempt={}). count={}", attempt, last.size());
-                return last;
+            try {
+                String blocksRaw = notionService.listBlockChildrenRaw(pageId);
+                blockRefs = attachmentService.extractImageRefsFromBlocksRaw(blocksRaw);
+            } catch (Exception e) {
+                log.warn("[Webhook] block children 조회 실패. attempt={}, pageId={}, err={}", attempt, pageId, e.getMessage());
             }
-            log.info("[Webhook] attachments 비어있음 (attempt={}). retry 예정.", attempt);
+
+            List<ReceiptAttachmentService.ImageRef> merged = mergeByUrl(commentRefs, blockRefs);
+            log.info("[Webhook] retry attempt={}, comments={}, blocks={}, merged={}, fallbackBlocks={}",
+                    attempt, commentRefs.size(), blockRefs.size(), merged.size(),
+                    (commentRefs.isEmpty() && !blockRefs.isEmpty()));
+
+            if (!merged.isEmpty()) {
+                if (attempt > 0) log.info("[Webhook] retry 성공 (attempt={}). count={}", attempt, merged.size());
+                return merged;
+            }
+            last = merged;
         }
         return last;
+    }
+
+    /** url 기준 중복 제거. a 가 우선. null 안전. */
+    private List<ReceiptAttachmentService.ImageRef> mergeByUrl(List<ReceiptAttachmentService.ImageRef> a,
+                                                               List<ReceiptAttachmentService.ImageRef> b) {
+        java.util.LinkedHashMap<String, ReceiptAttachmentService.ImageRef> map = new java.util.LinkedHashMap<>();
+        if (a != null) for (ReceiptAttachmentService.ImageRef r : a) {
+            if (r != null && r.getUrl() != null) map.putIfAbsent(r.getUrl(), r);
+        }
+        if (b != null) for (ReceiptAttachmentService.ImageRef r : b) {
+            if (r != null && r.getUrl() != null) map.putIfAbsent(r.getUrl(), r);
+        }
+        return new java.util.ArrayList<>(map.values());
     }
 
     private void recordEvent(String eventId, String eventType, String pageId, String commentId) {

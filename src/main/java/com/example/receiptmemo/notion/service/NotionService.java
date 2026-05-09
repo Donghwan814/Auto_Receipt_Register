@@ -176,6 +176,20 @@ public class NotionService {
                 .block();
     }
 
+    /**
+     * Notion block 의 자식 block 목록 조회 (raw JSON 문자열).
+     * Android Notion 등에서 댓글 attachments 가 늦게 반영되는 경우,
+     * 본문 image/file block 으로 들어온 이미지를 잡기 위해 사용.
+     */
+    public String listBlockChildrenRaw(String blockId) {
+        return notionWebClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/blocks/{id}/children").queryParam("page_size", 100).build(blockId))
+                .retrieve()
+                .onStatus(HttpStatusCode::isError, this::toError)
+                .bodyToMono(String.class)
+                .block();
+    }
+
     /** 페이지의 댓글 목록 조회 (DTO 매핑). */
     public List<com.example.receiptmemo.notion.dto.api.NotionCommentResponse> listComments(String pageId) {
         com.example.receiptmemo.notion.dto.api.NotionCommentListResponse resp = notionWebClient.get()

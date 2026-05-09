@@ -23,15 +23,14 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Notion 댓글 디버그 / 수동 처리 엔드포인트.
- *  - GET  /api/notion/comments/debug   : Notion API raw 댓글 JSON 반환 (debug-comments=true 일 때만)
- *  - POST /api/notion/comments/process : pageId 의 댓글 첨부를 다운로드해 영수증 처리
+ * Notion 댓글/블록 디버그 + 수동 처리 엔드포인트.
+ * 디버그 엔드포인트는 NOTION_WEBHOOK_DEBUG_COMMENTS=true 일 때만 활성화.
  */
 @Slf4j
-@Tag(name = "NotionCommentDebug", description = "Notion 댓글 디버그/수동 처리")
+@Tag(name = "NotionCommentDebug", description = "Notion 댓글/블록 디버그 및 수동 처리")
 @RestController
 @RequiredArgsConstructor
-@RequestMapping("/api/notion/comments")
+@RequestMapping("/api/notion")
 public class NotionCommentDebugController {
 
     private final NotionService notionService;
@@ -40,61 +39,114 @@ public class NotionCommentDebugController {
     private final ReceiptPageService receiptPageService;
 
     @Operation(summary = "[Debug] Notion 페이지의 raw 댓글 JSON 조회")
-    @GetMapping(value = "/debug", produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<?> debug(@RequestParam String pageId) {
-        if (!notionConfig.isDebugComments()) {
-            return ResponseEntity.status(403).body(Map.of(
-                    "error", "forbidden",
-                    "message", "comments debug endpoint is disabled. set NOTION_WEBHOOK_DEBUG_COMMENTS=true to enable."
-            ));
-        }
+    @GetMapping(value = "/comments/debug", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<?> debugComments(@RequestParam String pageId) {
+        ResponseEntity<?> denied = denyIfDebugDisabled();
+        if (denied != null) return denied;
         String raw = notionService.listCommentsRaw(pageId);
-        return ResponseEntity.ok()
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(raw);
+        return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(raw);
     }
 
-    @Operation(summary = "Notion 페이지 댓글의 이미지 첨부를 수동으로 처리")
-    @PostMapping("/process")
-    public ResponseEntity<?> process(@RequestParam String pageId) {
+    @Operation(summary = "[Debug] Notion 페이지의 raw block children JSON 조회")
+    @GetMapping(value = "/blocks/debug", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<?> debugBlocks(@RequestParam String pageId) {
+        ResponseEntity<?> denied = denyIfDebugDisabled();
+        if (denied != null) return denied;
+        String raw = notionService.listBlockChildrenRaw(pageId);
+        return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(raw);
+    }
+
+    @Operation(summary = "[Debug] 페이지의 댓글/블록 이미지 후보 통합 조회")
+    @GetMapping(value = "/images/debug", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<?> debugImages(@RequestParam String pageId) {
+        ResponseEntity<?> denied = denyIfDebugDisabled();
+        if (denied != null) return denied;
+
+        String commentsRaw = safeCall(() -> notionService.listCommentsRaw(pageId));
+        String blocksRaw = safeCall(() -> notionService.listBlockChildrenRaw(pageId));
+        List<ReceiptAttachmentService.ImageRef> commentRefs =
+                attachmentService.extractImageAttachmentsFromRaw(commentsRaw);
+        List<ReceiptAttachmentService.ImageRef> blockRefs =
+                attachmentService.extractImageRefsFromBlocksRaw(blocksRaw);
+        List<ReceiptAttachmentService.ImageRef> merged =
+                attachmentService.dedupeByUrl(commentRefs, blockRefs);
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("pageId", pageId);
+        body.put("commentImageRefs", commentRefs);
+        body.put("blockImageRefs", blockRefs);
+        body.put("mergedImageRefs", merged);
+        body.put("finalCount", merged.size());
+        return ResponseEntity.ok(body);
+    }
+
+    @Operation(summary = "Notion 페이지의 댓글/블록 이미지를 수동으로 처리. mode=resync(기본) | append")
+    @PostMapping("/comments/process")
+    public ResponseEntity<?> process(@RequestParam String pageId,
+                                     @RequestParam(value = "mode", required = false, defaultValue = "resync") String mode) {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("pageId", pageId);
+        result.put("mode", mode);
 
-        String rawJson;
+        List<ReceiptAttachmentService.ImageRef> commentRefs = List.of();
+        List<ReceiptAttachmentService.ImageRef> blockRefs = List.of();
         try {
-            rawJson = notionService.listCommentsRaw(pageId);
+            String commentsRaw = notionService.listCommentsRaw(pageId);
+            commentRefs = attachmentService.extractImageAttachmentsFromRaw(commentsRaw);
         } catch (Exception e) {
-            log.error("[CommentsProcess] 댓글 조회 실패. pageId={}, err={}", pageId, e.getMessage());
-            result.put("ok", false);
-            result.put("stage", "listCommentsRaw");
-            result.put("error", e.getMessage());
-            return ResponseEntity.status(502).body(result);
+            log.warn("[CommentsProcess] 댓글 조회 실패. pageId={}, err={}", pageId, e.getMessage());
+        }
+        try {
+            String blocksRaw = notionService.listBlockChildrenRaw(pageId);
+            blockRefs = attachmentService.extractImageRefsFromBlocksRaw(blocksRaw);
+        } catch (Exception e) {
+            log.warn("[CommentsProcess] block 조회 실패. pageId={}, err={}", pageId, e.getMessage());
         }
 
-        List<ReceiptAttachmentService.ImageRef> refs =
-                attachmentService.extractImageAttachmentsFromRaw(rawJson);
-        result.put("imageRefCount", refs.size());
+        List<ReceiptAttachmentService.ImageRef> merged = attachmentService.dedupeByUrl(commentRefs, blockRefs);
+        result.put("commentImageCount", commentRefs.size());
+        result.put("blockImageCount", blockRefs.size());
+        result.put("imageRefCount", merged.size());
 
-        List<MultipartFile> files = attachmentService.downloadAll(refs);
+        List<MultipartFile> files = attachmentService.downloadAll(merged);
         result.put("imageCount", files.size());
 
-        if (files.isEmpty()) {
+        boolean useAppend = "append".equalsIgnoreCase(mode);
+        if (files.isEmpty() && useAppend) {
             result.put("ok", true);
             result.put("message", "no image attachments");
             return ResponseEntity.ok(result);
         }
 
         try {
-            AddReceiptsToPageResponse added = receiptPageService.addReceiptsToPage(pageId, files, null);
-            result.put("ok", true);
-            result.put("added", added);
+            AddReceiptsToPageResponse processed = useAppend
+                    ? receiptPageService.addReceiptsToPage(pageId, files, null)
+                    : receiptPageService.resyncReceiptsForPage(pageId, files, null);
+            result.put("ok", processed.isSuccess());
+            result.put("processed", processed);
         } catch (Exception e) {
-            log.error("[CommentsProcess] addReceiptsToPage 실패. pageId={}, err={}", pageId, e.getMessage(), e);
+            log.error("[CommentsProcess] {} 실패. pageId={}, err={}",
+                    useAppend ? "addReceiptsToPage" : "resyncReceiptsForPage", pageId, e.getMessage(), e);
             result.put("ok", false);
-            result.put("stage", "addReceiptsToPage");
+            result.put("stage", useAppend ? "addReceiptsToPage" : "resyncReceiptsForPage");
             result.put("error", e.getMessage());
             return ResponseEntity.status(500).body(result);
         }
         return ResponseEntity.ok(result);
+    }
+
+    private ResponseEntity<?> denyIfDebugDisabled() {
+        if (!notionConfig.isDebugComments()) {
+            return ResponseEntity.status(403).body(Map.of(
+                    "error", "forbidden",
+                    "message", "debug endpoint disabled. set NOTION_WEBHOOK_DEBUG_COMMENTS=true to enable."
+            ));
+        }
+        return null;
+    }
+
+    private interface Supplier<T> { T get(); }
+    private <T> T safeCall(Supplier<T> s) {
+        try { return s.get(); } catch (Exception e) { return null; }
     }
 }

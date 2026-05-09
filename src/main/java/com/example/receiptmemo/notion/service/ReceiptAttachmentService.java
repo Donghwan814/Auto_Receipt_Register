@@ -150,6 +150,89 @@ public class ReceiptAttachmentService {
         return out;
     }
 
+    /**
+     * Notion block children raw JSON 에서 image/file block 의 이미지 URL 추출.
+     * 지원:
+     *  - block.type = "image", image.type = "file" → image.file.url
+     *  - block.type = "image", image.type = "external" → image.external.url
+     *  - block.type = "file",  file.type  = "file" → file.file.url
+     */
+    public List<ImageRef> extractImageRefsFromBlocksRaw(String rawJson) {
+        if (rawJson == null || rawJson.isBlank()) return List.of();
+        try {
+            return extractImageRefsFromBlocks(objectMapper.readTree(rawJson));
+        } catch (Exception e) {
+            log.error("[Attachment] blocks raw JSON 파싱 실패. err={}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    public List<ImageRef> extractImageRefsFromBlocks(JsonNode root) {
+        List<ImageRef> out = new ArrayList<>();
+        if (root == null || root.isMissingNode() || root.isNull()) return out;
+        JsonNode results = root.path("results");
+        if (!results.isArray()) {
+            log.info("[Attachment-Block] results 배열 없음. node={}", root.path("object").asText("?"));
+            return out;
+        }
+
+        log.info("[Attachment-Block] block count={}", results.size());
+        int idx = 0;
+        for (JsonNode block : results) {
+            String type = block.path("type").asText("");
+            ImageRef ref = imageRefFromBlock(block, type, idx);
+            if (ref != null) out.add(ref);
+            idx++;
+        }
+        log.info("[Attachment-Block] block 이미지 추출 개수 = {}", out.size());
+        return out;
+    }
+
+    private ImageRef imageRefFromBlock(JsonNode block, String type, int idx) {
+        JsonNode body = block.path(type);
+        if (!body.isObject()) return null;
+
+        String url = null;
+        String contentType = null;
+
+        if ("image".equals(type) || "file".equals(type)) {
+            String mediaType = body.path("type").asText("");
+            if ("file".equals(mediaType)) {
+                url = nonBlank(body.path("file").path("url").asText(null));
+            } else if ("external".equals(mediaType)) {
+                url = nonBlank(body.path("external").path("url").asText(null));
+            }
+            contentType = nonBlank(body.path("content_type").asText(null));
+        }
+        if (url == null) return null;
+
+        if ("file".equals(type)) {
+            // file block 은 이미지 확장자/contentType 일 때만 영수증 후보로 본다.
+            if (!urlLooksLikeImage(url) && (contentType == null || !contentType.toLowerCase(Locale.ROOT).startsWith("image/"))) {
+                log.info("[Attachment-Block] file block 인데 이미지 아님 → skip");
+                return null;
+            }
+        }
+
+        String blockId = block.path("id").asText("blk-" + idx);
+        String filename = inferFilename(url, fallbackFilename(blockId, idx, contentType, "image"));
+        String ct = (contentType != null && !contentType.isBlank()) ? contentType : guessContentType(filename);
+        log.info("[Attachment-Block] image url 추출. type={}, filename={}", type, filename);
+        return new ImageRef(url, filename, ct);
+    }
+
+    /** url 기준 중복 제거 (LinkedHashSet 순서 유지). */
+    public List<ImageRef> dedupeByUrl(List<ImageRef> a, List<ImageRef> b) {
+        java.util.LinkedHashMap<String, ImageRef> map = new java.util.LinkedHashMap<>();
+        if (a != null) for (ImageRef r : a) {
+            if (r != null && r.getUrl() != null) map.putIfAbsent(r.getUrl(), r);
+        }
+        if (b != null) for (ImageRef r : b) {
+            if (r != null && r.getUrl() != null) map.putIfAbsent(r.getUrl(), r);
+        }
+        return new ArrayList<>(map.values());
+    }
+
     /** Notion presigned URL을 다운로드한다. 실패 시 null. */
     public byte[] downloadAttachment(String url) {
         try {

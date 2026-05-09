@@ -11,4 +11,7 @@ public interface ProcessedReceiptRepository extends JpaRepository<ProcessedRecei
     List<ProcessedReceipt> findByNotionPageId(String notionPageId);
 
     List<ProcessedReceipt> findByNotionPageIdOrderByCreatedAtAsc(String notionPageId);
+
+    /** resync 시 페이지의 기존 영수증 row 를 모두 삭제. */
+    long deleteByNotionPageId(String notionPageId);
 }

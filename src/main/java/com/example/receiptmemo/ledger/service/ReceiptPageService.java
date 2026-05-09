@@ -115,6 +115,77 @@ public class ReceiptPageService {
         return w;
     }
 
+    // ---------- resync (source-of-truth: current page images) ----------
+
+    /**
+     * 현재 Notion 페이지에 존재하는 이미지들을 source of truth 로 보고,
+     * 해당 페이지의 processed_receipt 기록을 모두 지우고 다시 OCR/저장/집계한다.
+     *
+     * 호출자가 webhook/수동 처리 등에서 comments + blocks 의 현재 이미지를 모아
+     * 넘겨주면, 사용자가 영수증을 삭제/교체한 경우에도 안정적으로 동기화된다.
+     *
+     * 안전장치:
+     *  - files 가 비어있으면 Notion 값을 0/공백으로 덮어쓰지 않고 success=false 로 반환.
+     *  - 동일 fileHash 는 1번만 저장 (duplicated=true 표시).
+     */
+    @Transactional
+    public AddReceiptsToPageResponse resyncReceiptsForPage(String notionPageId,
+                                                           List<MultipartFile> files,
+                                                           LocalDate fallbackDate) {
+        if (notionPageId == null || notionPageId.isBlank()) {
+            throw new CustomException(ErrorCode.INVALID_INPUT, "notionPageId 가 비어 있습니다.");
+        }
+
+        if (files == null || files.isEmpty()) {
+            log.info("[Resync] 현재 이미지 없음 → Notion 페이지 유지. pageId={}", notionPageId);
+            return AddReceiptsToPageResponse.builder()
+                    .success(false)
+                    .pageId(notionPageId)
+                    .reason("이미지 없음")
+                    .warning("현재 페이지에 이미지가 없어 Notion 값을 유지합니다.")
+                    .build();
+        }
+
+        // 1) 기존 row 전부 삭제 (DB 동기화의 시작점)
+        long deleted = repository.deleteByNotionPageId(notionPageId);
+        log.info("[Resync] 기존 processed_receipt 삭제. pageId={}, deleted={}", notionPageId, deleted);
+
+        // 2) 분석 + fileHash 기준 batch dedupe
+        Set<String> seenHashes = new LinkedHashSet<>();
+        List<ReceiptAnalysisResult> analyzed = new ArrayList<>();
+        for (MultipartFile f : files) {
+            ReceiptAnalysisResult r = analyze(f, /*notionPageId=*/null, fallbackDate);
+            String h = r.getFileHash();
+            if (h != null && !seenHashes.add(h)) {
+                // 같은 batch 안에서 fileHash 중복 → duplicated 로 마킹만 하고 저장 X
+                analyzed.add(r.toBuilder().duplicated(true).build());
+                log.info("[Resync] batch 내 중복 이미지 skip. hash={}", h);
+                continue;
+            }
+            if (r.isOk()) {
+                ProcessedReceipt saved = save(notionPageId, r);
+                log.info("[Resync] saved receipt id={}, hash={}", saved.getId(), saved.getFileHash());
+            }
+            analyzed.add(r);
+        }
+
+        // 3) 재집계 + Notion 업데이트 (저장된 row 가 0이면 isLowQuality 가 안전하게 처리)
+        ReceiptPageAggregate agg = recalculateAndPushToNotion(notionPageId, fallbackDate, /*create=*/false);
+        List<String> warnings = collectMixedMerchantWarnings(notionPageId, agg);
+
+        return AddReceiptsToPageResponse.builder()
+                .success(true)
+                .pageId(notionPageId)
+                .title(agg.getTitle())
+                .totalAmount(agg.getAmount())
+                .date(agg.getDate())
+                .memo(agg.getMemo())
+                .warning(agg.getWarning())
+                .warnings(warnings.isEmpty() ? null : warnings)
+                .receipts(analyzed.stream().map(ReceiptAnalysisResponse::from).toList())
+                .build();
+    }
+
     // ---------- create new page ----------
 
     /**

@@ -193,4 +193,95 @@ class ReceiptPageServiceTest {
         verify(notionService).updateExpensePage(eq("page-EXIST"), anyString(), eq(25000), any(), anyString(), anyString(), anyString());
         verify(notionService, never()).createExpensePage(anyString(), anyInt(), any(), anyString(), anyString(), anyString());
     }
+
+    // ---------- resync ----------
+
+    @Test
+    void resync_같은_페이지에_영수증_2개_금액_합산() {
+        when(ocrService.extractText(any())).thenReturn(MASIRAMEN_1, MASIRAMEN_2);
+
+        AddReceiptsToPageResponse resp = service.resyncReceiptsForPage(
+                "page-RS",
+                List.of(file("a.jpg","a".getBytes()), file("b.jpg","b".getBytes())),
+                null);
+
+        assertThat(resp.isSuccess()).isTrue();
+        assertThat(resp.getTotalAmount()).isEqualTo(33500);
+        assertThat(resp.getMemo()).isEqualTo("블랙라멘 + 시오라멘 + 공기밥 + 제로콜라 + 교자");
+        assertThat(repository.findByNotionPageId("page-RS")).hasSize(2);
+        verify(notionService).updateExpensePage(eq("page-RS"), eq("마시타야"), eq(33500),
+                any(), eq("식비"), anyString(), eq("🍜"));
+    }
+
+    @Test
+    void resync_같은_이미지_2개는_1개만_반영() {
+        when(ocrService.extractText(any())).thenReturn(MASIRAMEN_1);
+
+        AddReceiptsToPageResponse resp = service.resyncReceiptsForPage(
+                "page-DUP",
+                List.of(file("a.jpg","same".getBytes()), file("b.jpg","same".getBytes())),
+                null);
+
+        assertThat(resp.isSuccess()).isTrue();
+        assertThat(resp.getTotalAmount()).isEqualTo(25000);
+        assertThat(repository.findByNotionPageId("page-DUP")).hasSize(1);
+        // 두 번째는 duplicated=true 로 표시
+        long dupCount = resp.getReceipts().stream().filter(r -> r.isDuplicated()).count();
+        assertThat(dupCount).isEqualTo(1);
+    }
+
+    @Test
+    void resync_기존_DB_A를_지우고_새_B만_반영() {
+        // 1단계: 기존에 영수증 A (마시타야, 25000) 가 DB 에 있는 상태
+        when(ocrService.extractText(any())).thenReturn(MASIRAMEN_1);
+        service.addReceiptsToPage("page-SW", List.of(file("a.jpg", "a".getBytes())), null);
+        assertThat(repository.findByNotionPageId("page-SW")).hasSize(1);
+
+        // 2단계: Notion 에서 A 를 삭제하고 B (커피빈, 18900) 만 새로 올린 상태로 resync
+        reset(notionService);
+        when(ocrService.extractText(any())).thenReturn(COFFEEBEAN);
+
+        AddReceiptsToPageResponse resp = service.resyncReceiptsForPage(
+                "page-SW", List.of(file("b.jpg", "b".getBytes())), null);
+
+        assertThat(resp.isSuccess()).isTrue();
+        assertThat(resp.getTotalAmount()).isEqualTo(18900); // A 합산 안 됨
+        java.util.List<com.example.receiptmemo.ledger.persistence.ProcessedReceipt> rows =
+                repository.findByNotionPageId("page-SW");
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).getMerchant()).isEqualTo("커피빈 홍대점");
+        verify(notionService).updateExpensePage(eq("page-SW"), eq("커피빈 홍대점"), eq(18900),
+                any(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void resync_이미지_0개면_Notion_페이지를_덮어쓰지_않음() {
+        AddReceiptsToPageResponse resp = service.resyncReceiptsForPage(
+                "page-EMPTY", java.util.List.of(), null);
+
+        assertThat(resp.isSuccess()).isFalse();
+        assertThat(resp.getReason()).isEqualTo("이미지 없음");
+        verifyNoInteractions(notionService);
+        // null files 도 동일
+        AddReceiptsToPageResponse resp2 = service.resyncReceiptsForPage("page-EMPTY", null, null);
+        assertThat(resp2.isSuccess()).isFalse();
+        assertThat(resp2.getReason()).isEqualTo("이미지 없음");
+    }
+
+    @Test
+    void resync_후_processed_receipt에는_현재_이미지_fileHash만_남음() {
+        // 기존: A (마시타야)
+        when(ocrService.extractText(any())).thenReturn(MASIRAMEN_1);
+        service.addReceiptsToPage("page-H", List.of(file("a.jpg", "a".getBytes())), null);
+        String oldHash = repository.findByNotionPageId("page-H").get(0).getFileHash();
+
+        // resync 로 B (커피빈) 만 새로 반영
+        when(ocrService.extractText(any())).thenReturn(COFFEEBEAN);
+        service.resyncReceiptsForPage("page-H", List.of(file("b.jpg", "different-bytes".getBytes())), null);
+
+        java.util.List<com.example.receiptmemo.ledger.persistence.ProcessedReceipt> rows =
+                repository.findByNotionPageId("page-H");
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).getFileHash()).isNotEqualTo(oldHash);
+    }
 }

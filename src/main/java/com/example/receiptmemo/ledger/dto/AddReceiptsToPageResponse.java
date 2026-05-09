@@ -20,4 +20,6 @@ public class AddReceiptsToPageResponse {
     private List<ReceiptAnalysisResponse> receipts;
     private String warning;
     private List<String> warnings;
+    /** resync 등에서 success=false 일 때 이유. */
+    private String reason;
 }

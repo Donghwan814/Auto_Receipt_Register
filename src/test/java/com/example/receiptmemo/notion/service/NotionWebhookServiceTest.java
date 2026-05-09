@@ -82,7 +82,7 @@ class NotionWebhookServiceTest {
         webhook.handle(p);
 
         verify(notionService).listCommentsRaw("page-1");
-        verify(receiptPageService).addReceiptsToPage(eq("page-1"), anyList(), isNull());
+        verify(receiptPageService).resyncReceiptsForPage(eq("page-1"), anyList(), isNull());
         verify(repo).save(any(WebhookEventLog.class));
     }
 
@@ -102,7 +102,7 @@ class NotionWebhookServiceTest {
     }
 
     @Test
-    void 첨부_없으면_addReceiptsToPage_호출없음() throws Exception {
+    void 첨부_없으면_resync_호출없음() throws Exception {
         JsonNode p = payload("""
                 {"id":"evt-2","type":"comment.created",
                  "entity":{"type":"comment","id":"c2"},
@@ -114,6 +114,7 @@ class NotionWebhookServiceTest {
 
         webhook.handle(p);
 
+        verify(receiptPageService, never()).resyncReceiptsForPage(anyString(), anyList(), any());
         verify(receiptPageService, never()).addReceiptsToPage(anyString(), anyList(), any());
     }
 
@@ -139,6 +140,6 @@ class NotionWebhookServiceTest {
         webhook.handle(p);
 
         verify(notionService).listCommentsRaw("page-7");
-        verify(receiptPageService).addReceiptsToPage(eq("page-7"), anyList(), isNull());
+        verify(receiptPageService).resyncReceiptsForPage(eq("page-7"), anyList(), isNull());
     }
 }
