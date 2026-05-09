@@ -6,7 +6,9 @@ import com.example.receiptmemo.notion.persistence.WebhookEventLogRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -29,6 +31,7 @@ public class NotionWebhookService {
     private final ReceiptAttachmentService attachmentService;
     private final ReceiptPageService receiptPageService;
     private final WebhookEventLogRepository eventLogRepository;
+    private final EventLogWriter eventLogWriter;
 
     /**
      * 재시도 딜레이(ms). 테스트에서 0으로 덮어쓸 수 있도록 final 아닌 필드.
@@ -36,7 +39,12 @@ public class NotionWebhookService {
      */
     long[] retryDelaysMs = {0L, 2000L, 5000L, 10000L, 20000L, 40000L};
 
-    @Transactional
+    /**
+     * 트랜잭션은 의도적으로 걸지 않는다.
+     * - resyncReceiptsForPage 자체에 @Transactional 이 있음.
+     * - eventLog 저장 시 중복키 등으로 DataIntegrityViolation 이 나도 외부 트랜잭션이
+     *   rollback-only 가 되지 않도록 분리 (EventLogWriter 가 REQUIRES_NEW 로 처리).
+     */
     public WebhookResult handle(JsonNode payload) {
         if (payload == null || payload.isNull() || payload.isEmpty()) {
             return WebhookResult.ok("empty payload");
@@ -155,16 +163,34 @@ public class NotionWebhookService {
 
     private void recordEvent(String eventId, String eventType, String pageId, String commentId) {
         if (eventId == null || eventId.isBlank()) return;
-        if (eventLogRepository.existsByEventId(eventId)) return;
-        try {
-            eventLogRepository.save(WebhookEventLog.builder()
-                    .eventId(eventId)
-                    .eventType(eventType)
-                    .pageId(pageId)
-                    .commentId(commentId)
-                    .build());
-        } catch (Exception e) {
-            log.warn("[Webhook] eventLog 저장 실패. eventId={}, err={}", eventId, e.getMessage());
+        eventLogWriter.recordIfAbsent(eventId, eventType, pageId, commentId);
+    }
+
+    /**
+     * eventLog 저장을 별도 트랜잭션으로 분리한다.
+     * - existsByEventId 로 중복 체크 후 save (race 가 있으면 DataIntegrityViolation 으로 catch).
+     * - 어떤 예외가 나도 외부 webhook 처리 흐름은 영향받지 않는다.
+     */
+    @org.springframework.stereotype.Component
+    @RequiredArgsConstructor
+    public static class EventLogWriter {
+        private final WebhookEventLogRepository repo;
+
+        @Transactional(propagation = Propagation.REQUIRES_NEW)
+        public void recordIfAbsent(String eventId, String eventType, String pageId, String commentId) {
+            try {
+                if (repo.existsByEventId(eventId)) return;
+                repo.save(WebhookEventLog.builder()
+                        .eventId(eventId)
+                        .eventType(eventType)
+                        .pageId(pageId)
+                        .commentId(commentId)
+                        .build());
+            } catch (DataIntegrityViolationException dup) {
+                log.info("[Webhook] eventLog 중복 → skip. eventId={}", eventId);
+            } catch (Exception e) {
+                log.warn("[Webhook] eventLog 저장 실패. eventId={}, err={}", eventId, e.getMessage());
+            }
         }
     }
 

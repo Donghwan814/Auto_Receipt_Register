@@ -21,6 +21,7 @@ class NotionWebhookServiceTest {
     private ReceiptAttachmentService attachmentService;
     private ReceiptPageService receiptPageService;
     private WebhookEventLogRepository repo;
+    private NotionWebhookService.EventLogWriter writer;
     private NotionWebhookService webhook;
     private final ObjectMapper om = new ObjectMapper();
 
@@ -48,7 +49,8 @@ class NotionWebhookServiceTest {
         attachmentService = mock(ReceiptAttachmentService.class);
         receiptPageService = mock(ReceiptPageService.class);
         repo = mock(WebhookEventLogRepository.class);
-        webhook = new NotionWebhookService(notionService, attachmentService, receiptPageService, repo);
+        writer = mock(NotionWebhookService.EventLogWriter.class);
+        webhook = new NotionWebhookService(notionService, attachmentService, receiptPageService, repo, writer);
         webhook.retryDelaysMs = new long[]{0L, 0L, 0L}; // 테스트 빠르게
     }
 
@@ -83,7 +85,7 @@ class NotionWebhookServiceTest {
 
         verify(notionService).listCommentsRaw("page-1");
         verify(receiptPageService).resyncReceiptsForPage(eq("page-1"), anyList(), isNull());
-        verify(repo).save(any(WebhookEventLog.class));
+        verify(writer).recordIfAbsent(eq("evt-1"), eq("comment.created"), eq("page-1"), eq("cmt-9"));
     }
 
     @Test
@@ -98,7 +100,7 @@ class NotionWebhookServiceTest {
         webhook.handle(p);
 
         verifyNoInteractions(notionService, attachmentService, receiptPageService);
-        verify(repo, never()).save(any());
+        verify(writer, never()).recordIfAbsent(any(), any(), any(), any());
     }
 
     @Test

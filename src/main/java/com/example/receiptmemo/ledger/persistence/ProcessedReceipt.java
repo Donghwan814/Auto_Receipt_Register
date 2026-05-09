@@ -43,11 +43,11 @@ public class ProcessedReceipt {
 
     private Integer amount;
 
-    @Lob
+    @Column(name = "memo", columnDefinition = "TEXT")
     private String memo;
 
     @Lob
-    @Column(name = "raw_text")
+    @Column(name = "raw_text", columnDefinition = "LONGTEXT")
     private String rawText;
 
     @Column(name = "created_at", nullable = false)

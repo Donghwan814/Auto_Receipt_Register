@@ -6,9 +6,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.http.HttpStatusCode;
+import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.reactive.function.client.ExchangeFilterFunction;
+import org.springframework.web.reactive.function.client.ClientResponse;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.net.URI;
@@ -18,6 +20,7 @@ import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 
 /**
  * Notion 댓글 raw JSON에서 이미지 첨부를 추출하고 다운로드한다.
@@ -39,8 +42,24 @@ public class ReceiptAttachmentService {
 
     public ReceiptAttachmentService(ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
+        // 일부 origin 서버가 Content-Type: image (slash 없음) 같은 비정상 헤더를 내려보내면
+        // Spring 의 MediaType.parseMediaType 이 InvalidMediaTypeException 을 던져 다운로드가 실패한다.
+        // 응답 단계에서 비정상 Content-Type 을 application/octet-stream 으로 보정한다.
+        ExchangeFilterFunction sanitizeContentType = ExchangeFilterFunction.ofResponseProcessor(resp -> {
+            List<String> ctHeaders = resp.headers().header(HttpHeaders.CONTENT_TYPE);
+            if (ctHeaders.isEmpty()) return reactor.core.publisher.Mono.just(resp);
+            String raw = ctHeaders.get(0);
+            if (raw == null || !raw.contains("/")) {
+                ClientResponse fixed = resp.mutate()
+                        .headers(h -> h.set(HttpHeaders.CONTENT_TYPE, "application/octet-stream"))
+                        .build();
+                return reactor.core.publisher.Mono.just(fixed);
+            }
+            return reactor.core.publisher.Mono.just(resp);
+        });
         this.downloadClient = WebClient.builder()
                 .codecs(c -> c.defaultCodecs().maxInMemorySize(20 * 1024 * 1024))
+                .filter(sanitizeContentType)
                 .build();
     }
 
@@ -136,7 +155,7 @@ public class ReceiptAttachmentService {
                 }
 
                 String filename = inferFilename(url, fallbackFilename(commentId, idx, contentType, category));
-                String ct = !contentType.isBlank() ? contentType : guessContentType(filename);
+                String ct = resolveContentType(contentType, null, filename != null ? filename : url);
                 out.add(new ImageRef(url, filename, ct));
                 idx++;
             }
@@ -216,7 +235,7 @@ public class ReceiptAttachmentService {
 
         String blockId = block.path("id").asText("blk-" + idx);
         String filename = inferFilename(url, fallbackFilename(blockId, idx, contentType, "image"));
-        String ct = (contentType != null && !contentType.isBlank()) ? contentType : guessContentType(filename);
+        String ct = resolveContentType(contentType, null, filename != null ? filename : url);
         log.info("[Attachment-Block] image url 추출. type={}, filename={}", type, filename);
         return new ImageRef(url, filename, ct);
     }
@@ -233,14 +252,34 @@ public class ReceiptAttachmentService {
         return new ArrayList<>(map.values());
     }
 
+    /** 다운로드 결과 (bytes + 응답 Content-Type 원문). */
+    @Getter
+    @RequiredArgsConstructor
+    public static class DownloadedBytes {
+        private final byte[] bytes;
+        private final String responseContentType;
+    }
+
     /** Notion presigned URL을 다운로드한다. 실패 시 null. */
     public byte[] downloadAttachment(String url) {
+        DownloadedBytes r = fetch(url);
+        return r == null ? null : r.getBytes();
+    }
+
+    /** 다운로드 + 응답 Content-Type 까지 함께 반환. 실패 시 null. */
+    public DownloadedBytes fetch(String url) {
         try {
             return downloadClient.get()
                     .uri(URI.create(url))
-                    .retrieve()
-                    .onStatus(HttpStatusCode::isError, resp -> resp.createException().map(e -> (Throwable) e))
-                    .bodyToMono(byte[].class)
+                    .exchangeToMono(resp -> {
+                        if (resp.statusCode().isError()) {
+                            return resp.createException().flatMap(reactor.core.publisher.Mono::error);
+                        }
+                        List<String> ctHeaders = resp.headers().header(HttpHeaders.CONTENT_TYPE);
+                        String responseCt = ctHeaders.isEmpty() ? null : ctHeaders.get(0);
+                        return resp.bodyToMono(byte[].class)
+                                .map(b -> new DownloadedBytes(b, responseCt));
+                    })
                     .block();
         } catch (Exception e) {
             log.error("[Attachment] 다운로드 실패. url={}, err={}", url, e.getMessage());
@@ -252,25 +291,77 @@ public class ReceiptAttachmentService {
         return new ByteArrayMultipartFile("files", filename, contentType, bytes);
     }
 
-    /** ImageRef 리스트를 다운로드해 MultipartFile 리스트로 변환. */
+    /**
+     * ImageRef 리스트를 다운로드해 MultipartFile 리스트로 변환.
+     * 한 건이 실패해도 다른 건은 계속 진행한다.
+     */
     public List<MultipartFile> downloadAll(List<ImageRef> refs) {
         List<MultipartFile> files = new ArrayList<>();
         if (refs == null || refs.isEmpty()) return files;
+        int ok = 0, fail = 0;
         for (ImageRef ref : refs) {
+            String filename = ref.getFilename();
+            String notionCt = ref.getContentType();
+            String urlForLog = abbreviateUrl(ref.getUrl());
             try {
-                byte[] data = downloadAttachment(ref.getUrl());
+                DownloadedBytes dl = fetch(ref.getUrl());
+                byte[] data = dl == null ? null : dl.getBytes();
+                String responseCt = dl == null ? null : dl.getResponseContentType();
                 if (data == null || data.length == 0) {
-                    log.warn("[Attachment] 다운로드 결과가 비어있음. file={}", ref.getFilename());
+                    log.warn("[Attachment] 다운로드 결과가 비어있음. url={}, filename={}, responseCt={}, notionCt={}",
+                            urlForLog, filename, responseCt, notionCt);
+                    fail++;
                     continue;
                 }
-                files.add(convertToMultipartFile(data, ref.getFilename(), ref.getContentType()));
-                log.info("[Attachment] 다운로드 성공. filename={}, contentType={}, size={}, sha256[0..8]={}",
-                        ref.getFilename(), ref.getContentType(), data.length, sha256Prefix(data));
+                String resolvedCt = resolveContentType(notionCt, responseCt, filename != null ? filename : ref.getUrl());
+                files.add(convertToMultipartFile(data, filename, resolvedCt));
+                log.info("[Attachment] 다운로드 성공. filename={}, responseCt={}, notionCt={}, resolvedCt={}, size={}, sha256[0..8]={}",
+                        filename, responseCt, notionCt, resolvedCt, data.length, sha256Prefix(data));
+                ok++;
             } catch (Exception e) {
-                log.error("[Attachment] 처리 실패. file={}, err={}", ref.getFilename(), e.getMessage());
+                log.error("[Attachment] 처리 실패. url={}, filename={}, notionCt={}, err={}",
+                        urlForLog, filename, notionCt, e.getMessage());
+                fail++;
             }
         }
+        log.info("[Attachment] downloadAll 완료. ok={}, fail={}, total={}", ok, fail, refs.size());
         return files;
+    }
+
+    /**
+     * MIME type 보정.
+     *  1) 응답 Content-Type 이 valid 하면 사용
+     *  2) Notion content_type 이 valid 하면 사용
+     *  3) URL/filename 확장자로 추론
+     *  4) 그래도 없으면 image/jpeg
+     */
+    public String resolveContentType(String notionContentType, String responseContentType, String filenameOrUrl) {
+        if (isValidMime(responseContentType)) return responseContentType;
+        if (isValidMime(notionContentType)) return notionContentType;
+        return inferFromExtension(filenameOrUrl).orElse("image/jpeg");
+    }
+
+    private boolean isValidMime(String value) {
+        return value != null && !value.isBlank() && value.contains("/");
+    }
+
+    private Optional<String> inferFromExtension(String filenameOrUrl) {
+        if (filenameOrUrl == null) return Optional.empty();
+        String s = filenameOrUrl.toLowerCase(Locale.ROOT);
+        int q = s.indexOf('?');
+        if (q >= 0) s = s.substring(0, q);
+        if (s.endsWith(".jpg") || s.endsWith(".jpeg")) return Optional.of("image/jpeg");
+        if (s.endsWith(".png")) return Optional.of("image/png");
+        if (s.endsWith(".webp")) return Optional.of("image/webp");
+        if (s.endsWith(".gif")) return Optional.of("image/gif");
+        return Optional.empty();
+    }
+
+    private String abbreviateUrl(String url) {
+        if (url == null) return null;
+        int q = url.indexOf('?');
+        String base = q > 0 ? url.substring(0, q) : url;
+        return base.length() > 80 ? base.substring(0, 80) + "..." : base;
     }
 
     /** raw JSON → 이미지 추출 → 다운로드. */
@@ -310,6 +401,10 @@ public class ReceiptAttachmentService {
                 int slash = path.lastIndexOf('/');
                 if (slash >= 0 && slash < path.length() - 1) {
                     String last = path.substring(slash + 1);
+                    // presigned URL 의 query string 은 URI.getPath 가 이미 떼어내지만
+                    // 일부 비표준 URL 대비 추가 방어.
+                    int q = last.indexOf('?');
+                    if (q >= 0) last = last.substring(0, q);
                     if (!last.isBlank()) {
                         try {
                             return URLDecoder.decode(last, StandardCharsets.UTF_8);

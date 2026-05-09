@@ -112,7 +112,7 @@ public class NotionCommentDebugController {
         result.put("imageCount", files.size());
 
         boolean useAppend = "append".equalsIgnoreCase(mode);
-        if (files.isEmpty() && useAppend) {
+        if (files.isEmpty()) {
             result.put("ok", true);
             result.put("message", "no image attachments");
             return ResponseEntity.ok(result);
