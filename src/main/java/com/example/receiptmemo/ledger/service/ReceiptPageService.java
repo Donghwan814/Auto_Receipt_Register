@@ -16,6 +16,7 @@ import com.example.receiptmemo.receipt.service.OcrService;
 import com.example.receiptmemo.receipt.service.ReceiptParser;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
@@ -128,7 +129,7 @@ public class ReceiptPageService {
      *  - files 가 비어있으면 Notion 값을 0/공백으로 덮어쓰지 않고 success=false 로 반환.
      *  - 동일 fileHash 는 1번만 저장 (duplicated=true 표시).
      */
-    @Transactional
+    @Transactional(noRollbackFor = DataIntegrityViolationException.class)
     public AddReceiptsToPageResponse resyncReceiptsForPage(String notionPageId,
                                                            List<MultipartFile> files,
                                                            LocalDate fallbackDate) {
@@ -150,7 +151,7 @@ public class ReceiptPageService {
         long deleted = repository.deleteByNotionPageId(notionPageId);
         log.info("[Resync] 기존 processed_receipt 삭제. pageId={}, deleted={}", notionPageId, deleted);
 
-        // 2) 분석 + fileHash 기준 batch dedupe
+        // 2) 분석 + fileHash 기준 batch dedupe + DB 중복 방어
         Set<String> seenHashes = new LinkedHashSet<>();
         List<ReceiptAnalysisResult> analyzed = new ArrayList<>();
         int okCount = 0;
@@ -159,20 +160,35 @@ public class ReceiptPageService {
             ReceiptAnalysisResult r = analyze(f, /*notionPageId=*/null, fallbackDate);
             String h = r.getFileHash();
             if (h != null && !seenHashes.add(h)) {
-                // 같은 batch 안에서 fileHash 중복 → duplicated 로 마킹만 하고 저장 X
+                // 같은 request 안에 같은 fileHash → duplicated 로 마킹만 하고 저장 X
                 analyzed.add(r.toBuilder().duplicated(true).build());
-                log.info("[Resync] batch 내 중복 이미지 skip. hash={}", h);
+                log.info("[Resync] request duplicate fileHash skip. hash={}", h);
                 continue;
             }
-            if (r.isOk()) {
+            if (!r.isOk()) {
+                errorCount++;
+                log.warn("[Resync] 영수증 분석 실패 → row 저장/집계에서 제외. error={}", r.getError());
+                analyzed.add(r);
+                continue;
+            }
+            // DB 에 이미 같은 (pageId, fileHash) 가 있으면 (race condition 등) duplicated 처리.
+            if (h != null && repository.existsByNotionPageIdAndFileHash(notionPageId, h)) {
+                log.info("[Resync] db duplicate fileHash skip. pageId={}, hash={}", notionPageId, h);
+                analyzed.add(r.toBuilder().duplicated(true).build());
+                continue;
+            }
+            // resync 는 step (1) 에서 같은 pageId 의 row 를 모두 delete 했고 page lock 으로
+            // 동시 처리가 차단되어 있으므로, 이 시점의 save 는 충돌이 날 일이 없다.
+            // 그래도 race 에 대비해 DataIntegrityViolation 은 duplicated=true 로 흡수.
+            try {
                 ProcessedReceipt saved = save(notionPageId, r);
                 log.info("[Resync] saved receipt id={}, hash={}", saved.getId(), saved.getFileHash());
                 okCount++;
-            } else {
-                errorCount++;
-                log.warn("[Resync] 영수증 분석 실패 → row 저장/집계에서 제외. error={}", r.getError());
+                analyzed.add(r);
+            } catch (DataIntegrityViolationException dup) {
+                log.info("[Resync] db duplicate fileHash skip (race). pageId={}, hash={}", notionPageId, h);
+                analyzed.add(r.toBuilder().duplicated(true).build());
             }
-            analyzed.add(r);
         }
 
         // 3) 모든 영수증이 OCR/파싱 실패라면 Notion 페이지를 덮어쓰지 않는다.

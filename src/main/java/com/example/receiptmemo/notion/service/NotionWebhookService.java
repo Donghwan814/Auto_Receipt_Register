@@ -32,6 +32,7 @@ public class NotionWebhookService {
     private final ReceiptPageService receiptPageService;
     private final WebhookEventLogRepository eventLogRepository;
     private final EventLogWriter eventLogWriter;
+    private final PageProcessingLockService pageLock;
 
     /**
      * 재시도 딜레이(ms). 테스트에서 0으로 덮어쓸 수 있도록 final 아닌 필드.
@@ -67,6 +68,20 @@ public class NotionWebhookService {
             return WebhookResult.ok("deleted page skip");
         }
 
+        // page.created: 페이지 생성 시점에는 댓글/이미지 업로드가 완료되지 않은 경우가 많아 skip.
+        // 실제 영수증 처리는 comment.created / page.content_updated 등으로 들어온다.
+        if ("page.created".equals(eventType)) {
+            log.info("[Webhook] page.created skip. eventId={}", eventId);
+            return WebhookResult.ok("page.created skip");
+        }
+
+        // page.properties_updated: 서버가 Notion 페이지를 update 하면 다시 들어오는 self-trigger.
+        // 처리하면 무한 루프가 된다.
+        if ("page.properties_updated".equals(eventType)) {
+            log.info("[Webhook] page.properties_updated skip. eventId={}", eventId);
+            return WebhookResult.ok("page.properties_updated skip");
+        }
+
         String pageId = extractPageId(payload);
         String commentId = extractCommentId(payload);
 
@@ -100,17 +115,25 @@ public class NotionWebhookService {
             return WebhookResult.ok("no downloads");
         }
 
-        try {
-            // resync: 현재 페이지에 존재하는 이미지를 source of truth 로 보고 재집계.
-            // 사용자가 영수증을 삭제/교체한 경우에도 안정적으로 동기화된다.
-            receiptPageService.resyncReceiptsForPage(pageId, files, null);
-            log.info("[Webhook] 영수증 resync 완료. pageId={}, count={}", pageId, files.size());
-        } catch (Exception e) {
-            log.error("[Webhook] resyncReceiptsForPage 실패. pageId={}, err={}", pageId, e.getMessage(), e);
+        // 같은 pageId 동시 처리 방지 — DB named lock (불가하면 JVM lock 으로 fallback).
+        boolean[] ran = {false};
+        boolean acquired = pageLock.runWithLock(pageId, () -> {
+            ran[0] = true;
+            try {
+                receiptPageService.resyncReceiptsForPage(pageId, files, null);
+                log.info("[Webhook] 영수증 resync 완료. pageId={}, count={}", pageId, files.size());
+            } catch (Exception e) {
+                log.error("[Webhook] resyncReceiptsForPage 실패. pageId={}, err={}", pageId, e.getMessage(), e);
+            }
+        });
+
+        if (!acquired) {
+            log.info("[Webhook] same page processing already running. pageId={}", pageId);
+            return WebhookResult.ok("page busy skip");
         }
 
         recordEvent(dedupKey, eventType, pageId, commentId);
-        return WebhookResult.ok("processed");
+        return WebhookResult.ok(ran[0] ? "processed" : "page busy skip");
     }
 
     /**

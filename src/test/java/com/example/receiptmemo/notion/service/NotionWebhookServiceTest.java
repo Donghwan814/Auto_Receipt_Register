@@ -22,6 +22,7 @@ class NotionWebhookServiceTest {
     private ReceiptPageService receiptPageService;
     private WebhookEventLogRepository repo;
     private NotionWebhookService.EventLogWriter writer;
+    private PageProcessingLockService pageLock;
     private NotionWebhookService webhook;
     private final ObjectMapper om = new ObjectMapper();
 
@@ -50,7 +51,13 @@ class NotionWebhookServiceTest {
         receiptPageService = mock(ReceiptPageService.class);
         repo = mock(WebhookEventLogRepository.class);
         writer = mock(NotionWebhookService.EventLogWriter.class);
-        webhook = new NotionWebhookService(notionService, attachmentService, receiptPageService, repo, writer);
+        pageLock = mock(PageProcessingLockService.class);
+        // 기본: lock 획득 성공 → task 즉시 실행
+        when(pageLock.runWithLock(anyString(), any(Runnable.class))).thenAnswer(inv -> {
+            ((Runnable) inv.getArgument(1)).run();
+            return true;
+        });
+        webhook = new NotionWebhookService(notionService, attachmentService, receiptPageService, repo, writer, pageLock);
         webhook.retryDelaysMs = new long[]{0L, 0L, 0L}; // 테스트 빠르게
     }
 
@@ -136,6 +143,51 @@ class NotionWebhookServiceTest {
         webhook.handle(p);
         verifyNoInteractions(notionService, attachmentService, receiptPageService);
         verify(writer, never()).recordIfAbsent(any(), any(), any(), any());
+    }
+
+    @Test
+    void page_created_이벤트는_즉시_skip() throws Exception {
+        JsonNode p = payload("""
+                {"id":"evt-pc","type":"page.created",
+                 "entity":{"type":"page","id":"page-A"}}
+                """);
+        webhook.handle(p);
+        verifyNoInteractions(notionService, attachmentService, receiptPageService, pageLock);
+        verify(writer, never()).recordIfAbsent(any(), any(), any(), any());
+    }
+
+    @Test
+    void page_properties_updated_이벤트는_즉시_skip() throws Exception {
+        JsonNode p = payload("""
+                {"id":"evt-pu","type":"page.properties_updated",
+                 "entity":{"type":"page","id":"page-B"}}
+                """);
+        webhook.handle(p);
+        verifyNoInteractions(notionService, attachmentService, receiptPageService, pageLock);
+        verify(writer, never()).recordIfAbsent(any(), any(), any(), any());
+    }
+
+    @Test
+    void pageLock_획득_실패시_resync_호출되지_않음() throws Exception {
+        // override: pageLock 이 false (busy) 반환하도록
+        reset(pageLock);
+        when(pageLock.runWithLock(anyString(), any(Runnable.class))).thenReturn(false);
+
+        JsonNode p = payload("""
+                {"id":"evt-busy","type":"comment.created",
+                 "entity":{"type":"comment","id":"c-busy"},
+                 "data":{"page_id":"page-busy"}}
+                """);
+        when(notionService.listCommentsRaw("page-busy")).thenReturn(RAW_WITH_IMAGE);
+        when(attachmentService.extractImageAttachmentsFromRaw(RAW_WITH_IMAGE, "c-busy"))
+                .thenReturn(List.of(new ReceiptAttachmentService.ImageRef(
+                        "https://prod-files-secure.s3/foo.png", "foo.png", "image/png")));
+        when(attachmentService.downloadAll(anyList())).thenReturn(List.of(mock(MultipartFile.class)));
+
+        webhook.handle(p);
+
+        verify(pageLock).runWithLock(eq("page-busy"), any(Runnable.class));
+        verify(receiptPageService, never()).resyncReceiptsForPage(anyString(), anyList(), any());
     }
 
     @Test
