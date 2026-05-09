@@ -153,6 +153,8 @@ public class ReceiptPageService {
         // 2) 분석 + fileHash 기준 batch dedupe
         Set<String> seenHashes = new LinkedHashSet<>();
         List<ReceiptAnalysisResult> analyzed = new ArrayList<>();
+        int okCount = 0;
+        int errorCount = 0;
         for (MultipartFile f : files) {
             ReceiptAnalysisResult r = analyze(f, /*notionPageId=*/null, fallbackDate);
             String h = r.getFileHash();
@@ -165,11 +167,29 @@ public class ReceiptPageService {
             if (r.isOk()) {
                 ProcessedReceipt saved = save(notionPageId, r);
                 log.info("[Resync] saved receipt id={}, hash={}", saved.getId(), saved.getFileHash());
+                okCount++;
+            } else {
+                errorCount++;
+                log.warn("[Resync] 영수증 분석 실패 → row 저장/집계에서 제외. error={}", r.getError());
             }
             analyzed.add(r);
         }
 
-        // 3) 재집계 + Notion 업데이트 (저장된 row 가 0이면 isLowQuality 가 안전하게 처리)
+        // 3) 모든 영수증이 OCR/파싱 실패라면 Notion 페이지를 덮어쓰지 않는다.
+        if (okCount == 0) {
+            String reason = errorCount > 0 ? "OCR_FAILED" : "NO_VALID_RECEIPTS";
+            log.warn("[ReceiptPageService] Notion update skipped. reason={}, pageId={}, errorCount={}",
+                    reason, notionPageId, errorCount);
+            return AddReceiptsToPageResponse.builder()
+                    .success(false)
+                    .pageId(notionPageId)
+                    .reason(reason)
+                    .warning("OCR 결과가 없어 Notion 페이지를 업데이트하지 않습니다.")
+                    .receipts(analyzed.stream().map(ReceiptAnalysisResponse::from).toList())
+                    .build();
+        }
+
+        // 4) 재집계 + Notion 업데이트
         ReceiptPageAggregate agg = recalculateAndPushToNotion(notionPageId, fallbackDate, /*create=*/false);
         List<String> warnings = collectMixedMerchantWarnings(notionPageId, agg);
 
@@ -290,6 +310,14 @@ public class ReceiptPageService {
     private ReceiptPageAggregate recalculateAndPushToNotion(String pageId, LocalDate fallbackDate, boolean justCreated) {
         List<ProcessedReceipt> rows = repository.findByNotionPageIdOrderByCreatedAtAsc(pageId);
         ReceiptPageAggregate agg = aggregationService.aggregate(rows, fallbackDate);
+
+        // 안전장치: row 가 하나도 없거나 merchant/amount/memo 가 모두 비어있으면
+        // (가게 미상)/0원 으로 덮어쓰지 않는다. justCreated 는 방금 만든 페이지라 이 경로로 오지 않는다.
+        if (!justCreated && isEmptyAggregate(rows, agg)) {
+            log.warn("[ReceiptPageService] Notion update skipped. reason=NO_VALID_RECEIPTS, pageId={}", pageId);
+            return agg;
+        }
+
         try {
             notionService.updateExpensePage(pageId, agg.getTitle(), agg.getAmount(), agg.getDate(),
                     agg.getCategory(), agg.getMemo(), agg.getIconEmoji());
@@ -298,6 +326,14 @@ public class ReceiptPageService {
             log.warn("[ReceiptPageService] Notion 업데이트 실패 (집계는 완료됨): {}", e.getMessage());
         }
         return agg;
+    }
+
+    private boolean isEmptyAggregate(List<ProcessedReceipt> rows, ReceiptPageAggregate agg) {
+        if (rows == null || rows.isEmpty()) return true;
+        boolean noMerchant = agg.getMerchant() == null || agg.getMerchant().isBlank();
+        boolean zeroAmount = agg.getAmount() == 0;
+        boolean noMemo = agg.getMemo() == null || agg.getMemo().isBlank();
+        return noMerchant && zeroAmount && noMemo;
     }
 
     /** OCR + 파싱 + 해시 + 중복판정 → 분석 결과. 실패해도 예외를 던지지 않는다. */

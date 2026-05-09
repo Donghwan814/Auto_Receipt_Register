@@ -284,4 +284,46 @@ class ReceiptPageServiceTest {
         assertThat(rows).hasSize(1);
         assertThat(rows.get(0).getFileHash()).isNotEqualTo(oldHash);
     }
+
+    // ---------- OCR 실패 가드 ----------
+
+    @Test
+    void resync_모든_OCR이_실패하면_Notion_업데이트_안함() {
+        when(ocrService.extractText(any()))
+                .thenThrow(new com.example.receiptmemo.global.exception.CustomException(
+                        com.example.receiptmemo.global.exception.ErrorCode.OCR_FAILED, "vision down"));
+
+        AddReceiptsToPageResponse resp = service.resyncReceiptsForPage(
+                "page-FAIL",
+                List.of(file("a.jpg","a".getBytes()), file("b.jpg","b".getBytes())),
+                null);
+
+        assertThat(resp.isSuccess()).isFalse();
+        assertThat(resp.getReason()).isEqualTo("OCR_FAILED");
+        verify(notionService, never()).updateExpensePage(anyString(), anyString(), anyInt(),
+                any(), anyString(), anyString(), anyString());
+        // 가게 미상/0/공백 으로 덮어쓰지 않았는지 확인
+        verify(notionService, never()).updateExpensePage(eq("page-FAIL"), eq("(가게 미상)"),
+                eq(0), any(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void resync_성공_1개_실패_1개면_성공한_1개만_반영() {
+        // 1번째 호출: 실패, 2번째 호출: 성공
+        when(ocrService.extractText(any()))
+                .thenThrow(new com.example.receiptmemo.global.exception.CustomException(
+                        com.example.receiptmemo.global.exception.ErrorCode.OCR_FAILED, "transient"))
+                .thenReturn(MASIRAMEN_1);
+
+        AddReceiptsToPageResponse resp = service.resyncReceiptsForPage(
+                "page-MIX2",
+                List.of(file("bad.jpg","bad".getBytes()), file("good.jpg","good".getBytes())),
+                null);
+
+        assertThat(resp.isSuccess()).isTrue();
+        assertThat(resp.getTotalAmount()).isEqualTo(25000);
+        assertThat(repository.findByNotionPageId("page-MIX2")).hasSize(1);
+        verify(notionService).updateExpensePage(eq("page-MIX2"), eq("마시타야"), eq(25000),
+                any(), anyString(), anyString(), anyString());
+    }
 }

@@ -128,6 +128,17 @@ class NotionWebhookServiceTest {
     }
 
     @Test
+    void page_deleted_이벤트는_즉시_skip() throws Exception {
+        JsonNode p = payload("""
+                {"id":"evt-del","type":"page.deleted",
+                 "entity":{"type":"page","id":"page-X"}}
+                """);
+        webhook.handle(p);
+        verifyNoInteractions(notionService, attachmentService, receiptPageService);
+        verify(writer, never()).recordIfAbsent(any(), any(), any(), any());
+    }
+
+    @Test
     void page_content_updated_에서도_pageId_있으면_댓글_재시도() throws Exception {
         JsonNode p = payload("""
                 {"id":"evt-pc","type":"page.content_updated",

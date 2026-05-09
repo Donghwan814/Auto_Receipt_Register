@@ -59,6 +59,14 @@ public class NotionWebhookService {
         String eventType = textOrNull(payload, "type");
         String eventId = resolveEventId(payload);
 
+        // 삭제된 페이지는 comments/blocks/OCR 어떤 처리도 하지 않는다.
+        if (eventType != null && (eventType.equals("page.deleted")
+                || eventType.equals("page.removed")
+                || eventType.equals("page.trashed"))) {
+            log.info("[Webhook] {} 이벤트 → skip. eventId={}", eventType, eventId);
+            return WebhookResult.ok("deleted page skip");
+        }
+
         String pageId = extractPageId(payload);
         String commentId = extractCommentId(payload);
 
