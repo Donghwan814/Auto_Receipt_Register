@@ -8,6 +8,7 @@ import io.netty.channel.ChannelOption;
 import io.netty.handler.timeout.ReadTimeoutHandler;
 import io.netty.handler.timeout.WriteTimeoutHandler;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
@@ -50,15 +51,26 @@ public class GoogleVisionOcrService implements OcrService {
     /** 재시도 backoff. 테스트에서 0으로 덮어쓸 수 있도록 final 아닌 필드. */
     long[] retryBackoffMs = {1000L, 3000L, 7000L};
 
+    /**
+     * Spring 이 사용하는 production 생성자.
+     * 다중 생성자가 있을 때 Spring 이 모호함으로 no-arg 를 찾다가 NoSuchMethodException 으로
+     * 빈 생성에 실패하는 것을 막기 위해 @Autowired 를 명시한다.
+     */
+    @Autowired
     public GoogleVisionOcrService(OcrProperties props, WebClient.Builder builder) {
-        this(props, defaultWebClient(builder));
+        this.config = props.getGoogle();
+        this.webClient = defaultWebClient(builder);
+        warnIfNoApiKey();
     }
 
-    /** 테스트 용도: WebClient 를 직접 주입. */
+    /** 테스트 용도: WebClient 를 직접 주입. Spring 은 @Autowired 가 붙은 생성자만 사용한다. */
     GoogleVisionOcrService(OcrProperties props, WebClient webClient) {
         this.config = props.getGoogle();
         this.webClient = webClient;
+        warnIfNoApiKey();
+    }
 
+    private void warnIfNoApiKey() {
         if (config.getApiKey() == null || config.getApiKey().isBlank()) {
             log.warn("[GoogleVision] api-key 가 비어 있습니다. ocr.google.api-key 또는 GOOGLE_VISION_API_KEY 를 설정하세요.");
         }
