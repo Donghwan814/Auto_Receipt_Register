@@ -326,7 +326,6 @@ class ReceiptParserTest {
                 """;
         assertThat(parser.parse(raw).getTotalAmount()).isNull();
     }
-<<<<<<< ours
 
     // ---------- OCR 줄 분리 합계 라벨 ----------
 
@@ -419,6 +418,4 @@ class ReceiptParserTest {
         assertThat(ReceiptParser.normalizeLabelCandidate("합\t계 :")).isEqualTo("합계");
         assertThat(ReceiptParser.normalizeLabelCandidate("합계")).isEqualTo("합계");
     }
-=======
->>>>>>> theirs
 }
