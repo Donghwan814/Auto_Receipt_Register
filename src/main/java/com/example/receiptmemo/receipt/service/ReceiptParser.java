@@ -352,6 +352,7 @@ public class ReceiptParser {
         for (String label : AMOUNT_LABEL_PRIORITY) {
             Integer found = scanByLabel(lines, label);
             if (found != null) return found;
+<<<<<<< ours
         }
         return null;
     }
@@ -456,6 +457,67 @@ public class ReceiptParser {
         for (String ex : AMOUNT_EXCLUDE_LABELS) {
             if (c.contains(ex)) return true;
         }
+=======
+        }
+        return null;
+    }
+
+    /** test 호환을 위해 String도 받는 오버로드. */
+    Integer extractTotal(String rawText) {
+        if (rawText == null) return null;
+        return extractTotal(rawText.split("\\r?\\n"));
+    }
+
+    private Integer scanByLabel(String[] lines, String label) {
+        String labelCompact = compact(label);
+        for (int i = 0; i < lines.length; i++) {
+            if (lines[i] == null) continue;
+            String c = compact(lines[i]);
+            if (!c.contains(labelCompact)) continue;
+            // 라벨 줄이지만 사실상 다른 라벨에 의해 가려지는 경우 방지
+            if (matchesExcludedAmountLabel(c, labelCompact)) continue;
+
+            // 1) 같은 줄, 라벨 뒤에서 숫자 추출
+            Integer same = amountAfterLabel(lines[i], label);
+            if (same != null && same <= AMOUNT_MAX) return same;
+
+            // 2) 다음 1~3줄에서 숫자 추출
+            for (int k = 1; k <= 3 && i + k < lines.length; k++) {
+                String next = lines[i + k];
+                if (next == null || next.trim().isEmpty()) continue;
+                if (isAmountNoiseLine(next)) continue;
+                if (isAnotherLabel(next, label)) break; // 다른 라벨 만나면 중단
+                Integer val = firstAmountToken(next);
+                if (val != null && val <= AMOUNT_MAX) return val;
+            }
+        }
+        return null;
+    }
+
+    private boolean matchesExcludedAmountLabel(String compactLine, String wantedCompact) {
+        for (String ex : AMOUNT_EXCLUDE_LABELS) {
+            if (compactLine.contains(ex) && !ex.contains(wantedCompact) && !wantedCompact.contains(ex)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 사업자번호/전화/카드/승인/POS/BILL 줄 → 금액 후보로 부적합. */
+    private boolean isAmountNoiseLine(String line) {
+        if (BIZ_NUM.matcher(line).find()) return true;
+        if (PHONE.matcher(line).find()) return true;
+        if (CARD_NUM.matcher(line).find()) return true;
+        if (APPROVAL_LABEL.matcher(line).find()) return true;
+        String c = compact(line);
+        if (c.contains("POS")) return true;
+        if (c.contains("BILL")) return true;
+        if (c.contains("바코드")) return true;
+        if (c.contains("주문번호")) return true;
+        for (String ex : AMOUNT_EXCLUDE_LABELS) {
+            if (c.contains(ex)) return true;
+        }
+>>>>>>> theirs
         return false;
     }
 
@@ -470,6 +532,22 @@ public class ReceiptParser {
         return false;
     }
 
+<<<<<<< ours
+=======
+    private Integer amountAfterLabel(String line, String label) {
+        String labelPattern = label.chars()
+                .mapToObj(ch -> Pattern.quote(String.valueOf((char) ch)))
+                .reduce((a, b) -> a + "\\s*" + b)
+                .orElse("");
+        Pattern p = Pattern.compile(labelPattern + "[^0-9]*" + AMOUNT_TOKEN.pattern());
+        Matcher m = p.matcher(line);
+        if (m.find()) {
+            return parseAmount(m.group(1));
+        }
+        return null;
+    }
+
+>>>>>>> theirs
     private Integer firstAmountToken(String line) {
         Matcher m = AMOUNT_TOKEN.matcher(line);
         if (m.find()) {

@@ -15,7 +15,12 @@
       "Bash(./gradlew bootJar --no-daemon)",
       "Bash(tasklist)",
       "Bash(taskkill /PID 21208 /F)",
+<<<<<<< ours
       "PowerShell(Stop-Process -Id 21208 -Force)"
+=======
+      "PowerShell(Stop-Process -Id 21208 -Force)",
+      "Bash(cd /c/Users/socce/OneDrive/Desktop/autoregister *)"
+>>>>>>> theirs
     ]
   }
 }
